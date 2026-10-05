@@ -53,3 +53,32 @@ libtiff6 libtirpc3t64 libtk8.6 libx11-6 libxt6t64
 3. **システムライブラリ（第6章）**：R 本体の置き場所には権限が要らない。しかし、R の実行に必要な共有ライブラリが不足することがある。必要なものは R の版ごとに違う（3.6 系は libpcre3）。そのため、インストールの後に R 本体の共有ライブラリを V3b と同じ方法で調べ、不足があれば apt のコマンドを示す。sudo は実行しない → **要件の追記を提案する**。
 4. **OS の名前の対応**：`/etc/os-release` から、Posit の R ビルドの名前（`ubuntu-2404`）と P3M の名前（`noble`）の両方を導く対応表が要る。
 5. **入手可能な版**：`https://cdn.posit.co/r/versions.json` の `r_versions`（61件、`next`・`devel` を含む）。OS ごとの有無は載っていないので、HEAD で確かめる。
+
+## 追記：portable な R ビルドの予備確認（2026-10-05、`./portable.sh`）
+
+uvr の README から、Posit が **portable な R ビルド**（`manylinux_2_34`、試験的）を出していると分かった。https://github.com/rstudio/r-builds によると、次の性質を持つ。
+
+- 主な共有ライブラリを同梱する
+- 展開した場所を R 自身が実行時に検出する
+- glibc 2.34 以上（Ubuntu 22.04 以降、RHEL 9 以降など）の Linux で動く
+- 必要なのは ca-certificates と fontconfig だけとされている
+- Windows（x86_64、R 3.6.3 以降）と macOS（R 4.1.0 以降）向けの portable なものもある
+
+URL は `https://cdn.posit.co/r/manylinux_2_34/R-<版>-manylinux_2_34.tar.gz` で、arm64 は末尾に `-arm64` が付く。3.6.3、4.0.5、4.2.3、4.4.2、4.6.1 で取得できた（1つ約 100〜110 MB。4.4.2 では、通常のビルドの 63 MB に対して 108 MB で、約 7 割大きい）。
+
+| 確認 | 結果 |
+|---|---|
+| まっさらな `ubuntu:24.04`、一般ユーザー、apt で何も入れない | 展開しただけで、`R --version` と `Rscript` が動いた。書き換えも Rscript のラッパーも不要。R 本体とモジュールが参照するライブラリに不足なし（0件）。`solve()` も動く。capabilities は cairo、tcltk、ICU、libcurl が TRUE |
+| 同上で HTTPS（`url()`） | CA 証明書がないため失敗した。ca-certificates が要る（README の記載どおり） |
+| ca-certificates・libcurl4t64・libgomp1 だけを入れ、P3M のバイナリを入れる | data.table、curl、jsonlite が入って動いた。curl パッケージが使うシステムの libcurl（8.5.0）と、R に同梱の libcurl（7.76.1）が共存し、HTTPS も通った |
+| 同上で、libgomp1 を入れない場合 | data.table のバイナリが `libgomp.so.1` を見つけられず、読み込めない。portable な R が同梱するのは、自身が使うライブラリだけである。パッケージのバイナリが使うライブラリは、V3b の方法で判定する |
+
+**予備確認の結論**：portable なビルドを使えば、R 本体の配置で「まっさらな環境では apt が1回必要」という制約（本書の上の結論）をほぼなくせる見込みがある。必要なのは ca-certificates だけになる。また、書き換えの手順（relocate.sh）も要らなくなる。
+
+まだ確かめていないことは、次のとおりである。いずれも V1b として検証することを提案する。
+
+- ソースからのビルド（`R CMD INSTALL` が、同梱のライブラリや Makeconf と噛み合うか）
+- sf などのシステムのライブラリを使うパッケージとの組み合わせ
+- Positron などの IDE が認識するか
+- 「試験的」という位置づけ
+- 同梱のライブラリの更新（OS の更新では直らず、R を入れ直す必要がある）
