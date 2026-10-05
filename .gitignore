@@ -1,0 +1,13 @@
+# Rust
+/target/
+
+# spikes の生成物
+spikes/*/out/
+
+# R CMD build・check の生成物
+/*.tar.gz
+*.Rcheck/
+
+# R
+.Rhistory
+.RData
