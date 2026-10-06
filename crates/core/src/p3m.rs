@@ -1,0 +1,539 @@
+//! Posit Package Manager (P3M): snapshot dates and package indexes.
+//!
+//! Facts used here were checked in phase 0 (V3, V10): `/__api__/repos/cran/transaction-dates`
+//! lists the published snapshot dates; `/cran/<date>/src/contrib/PACKAGES.gz` is the index of a
+//! date (the Linux binary index is identical); a dated index never changes, so it is cached
+//! forever; the index lists R-devel's recommended packages a second time with a `Path` field.
+
+use std::collections::HashMap;
+use std::io::Read;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime};
+
+use serde::Deserialize;
+
+use crate::constraint::Constraint;
+use crate::date;
+use crate::dcf::{self, Dependency};
+use crate::http::{Http, HttpError};
+use crate::paths::UserDirs;
+use crate::version::Version;
+
+/// The public P3M instance.
+pub const DEFAULT_URL: &str = "https://packagemanager.posit.co";
+
+/// How long a downloaded list of snapshot dates is used before it is fetched again.
+const DATES_MAX_AGE: Duration = Duration::from_secs(60 * 60);
+
+#[derive(Debug, thiserror::Error)]
+pub enum P3mError {
+    #[error(transparent)]
+    Http(#[from] HttpError),
+    #[error("{path}: {source}")]
+    Io {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("unexpected response from {url}: {message}")]
+    Response { url: String, message: String },
+    #[error(transparent)]
+    Snapshot(#[from] SnapshotError),
+}
+
+fn io_err(path: &Path) -> impl FnOnce(std::io::Error) -> P3mError + '_ {
+    move |source| P3mError::Io {
+        path: path.to_path_buf(),
+        source,
+    }
+}
+
+/// Why a snapshot date could not be resolved.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum SnapshotError {
+    #[error("`{0}` is not a date; use the form YYYY-MM-DD")]
+    InvalidDate(String),
+    #[error("{requested} is in the future (today is {today})")]
+    InFuture { requested: String, today: String },
+    #[error("{requested} is before the first P3M snapshot ({first})")]
+    BeforeFirst { requested: String, first: String },
+    #[error("P3M lists no snapshot dates")]
+    NoSnapshots,
+}
+
+/// Resolves a snapshot date (requirements, chapter 7 "スナップショットの日付").
+///
+/// Without a request, returns the latest published date. A requested date resolves to the latest
+/// published date on or before it. `dates` must be sorted. `today` is today's UTC date; one extra
+/// day is allowed so that users ahead of UTC can ask for their local "today".
+pub fn resolve_date(
+    dates: &[String],
+    requested: Option<&str>,
+    today: &str,
+) -> Result<String, SnapshotError> {
+    let (Some(first), Some(last)) = (dates.first(), dates.last()) else {
+        return Err(SnapshotError::NoSnapshots);
+    };
+    let Some(requested) = requested else {
+        return Ok(last.clone());
+    };
+    if !date::is_valid(requested) {
+        return Err(SnapshotError::InvalidDate(requested.to_string()));
+    }
+    let tomorrow = date::add_days(today, 1).unwrap_or_else(|| today.to_string());
+    if requested > tomorrow.as_str() {
+        return Err(SnapshotError::InFuture {
+            requested: requested.to_string(),
+            today: today.to_string(),
+        });
+    }
+    if requested < first.as_str() {
+        return Err(SnapshotError::BeforeFirst {
+            requested: requested.to_string(),
+            first: first.clone(),
+        });
+    }
+    let i = dates.partition_point(|d| d.as_str() <= requested);
+    Ok(dates[i - 1].clone())
+}
+
+/// The published snapshot dates, oldest first.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SnapshotDates {
+    pub dates: Vec<String>,
+    /// True when the list could not be refreshed and an older cached copy was used.
+    pub stale: bool,
+}
+
+/// A P3M instance with a local cache.
+#[derive(Debug, Clone)]
+pub struct P3m {
+    base: String,
+    http: Http,
+    cache: PathBuf,
+}
+
+impl P3m {
+    /// `base` is the server URL, such as [`DEFAULT_URL`].
+    pub fn new(base: &str, http: Http, dirs: &UserDirs) -> P3m {
+        let base = base.trim_end_matches('/').to_string();
+        let host: String = base
+            .split_once("://")
+            .map_or(base.as_str(), |(_, rest)| rest)
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '.' || c == '-' {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        P3m {
+            cache: dirs.p3m_cache().join(host),
+            base,
+            http,
+        }
+    }
+
+    /// The CRAN repository URL for a snapshot date, as written to lockfiles.
+    pub fn cran_url(&self, date: &str) -> String {
+        format!("{}/cran/{date}", self.base)
+    }
+
+    /// The published snapshot dates. A cached list is used when it is less than an hour old, or
+    /// when it already covers `needed` (a date that must not be newer than the last listed one).
+    /// If the download fails, an older cached list is used and marked `stale`.
+    pub fn snapshot_dates(&self, needed: Option<&str>) -> Result<SnapshotDates, P3mError> {
+        let path = self.cache.join("transaction-dates.json");
+        let cached = read_dates(&path);
+        if let Some((dates, age)) = &cached {
+            let covers =
+                needed.is_some_and(|d| dates.last().is_some_and(|last| d <= last.as_str()));
+            if age < &DATES_MAX_AGE || covers {
+                return Ok(SnapshotDates {
+                    dates: dates.clone(),
+                    stale: false,
+                });
+            }
+        }
+        let url = format!("{}/__api__/repos/cran/transaction-dates", self.base);
+        let body = match self.http.get_bytes(&url, None) {
+            Ok(body) => body,
+            Err(e) => {
+                return match cached {
+                    Some((dates, _)) => Ok(SnapshotDates { dates, stale: true }),
+                    None => Err(e.into()),
+                };
+            }
+        };
+        let dates = parse_dates(&body).map_err(|message| P3mError::Response {
+            url: url.clone(),
+            message,
+        })?;
+        write_atomic(&path, &body)?;
+        Ok(SnapshotDates {
+            dates,
+            stale: false,
+        })
+    }
+
+    /// Resolves a snapshot date against the published dates (see [`resolve_date`]).
+    pub fn resolve_snapshot(
+        &self,
+        requested: Option<&str>,
+    ) -> Result<(String, SnapshotDates), P3mError> {
+        let dates = self.snapshot_dates(requested)?;
+        let resolved = resolve_date(&dates.dates, requested, &date::today_utc())?;
+        Ok((resolved, dates))
+    }
+
+    /// The package index of a snapshot date, downloaded once and then read from the cache.
+    pub fn index(&self, date: &str) -> Result<Index, P3mError> {
+        if !date::is_valid(date) {
+            return Err(SnapshotError::InvalidDate(date.to_string()).into());
+        }
+        let path = self.cache.join("cran").join(date).join("PACKAGES.gz");
+        let gz = match std::fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                let url = format!("{}/src/contrib/PACKAGES.gz", self.cran_url(date));
+                let bytes = self.http.get_bytes(&url, None)?;
+                // Check that the download is a readable index before caching it forever.
+                let text = gunzip(&bytes).map_err(|message| P3mError::Response { url, message })?;
+                write_atomic(&path, &bytes)?;
+                return Ok(Index::parse(date, &text));
+            }
+            Err(e) => return Err(io_err(&path)(e)),
+        };
+        let text = gunzip(&gz).map_err(|message| P3mError::Response {
+            url: path.display().to_string(),
+            message,
+        })?;
+        Ok(Index::parse(date, &text))
+    }
+}
+
+fn read_dates(path: &Path) -> Option<(Vec<String>, Duration)> {
+    let body = std::fs::read(path).ok()?;
+    let age = std::fs::metadata(path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| SystemTime::now().duration_since(t).ok())
+        .unwrap_or(Duration::MAX);
+    Some((parse_dates(&body).ok()?, age))
+}
+
+fn parse_dates(body: &[u8]) -> Result<Vec<String>, String> {
+    #[derive(Deserialize)]
+    struct Entry {
+        alias: String,
+    }
+    let entries: Vec<Entry> = serde_json::from_slice(body).map_err(|e| e.to_string())?;
+    let mut dates: Vec<String> = entries
+        .into_iter()
+        .map(|e| e.alias)
+        .filter(|d| date::is_valid(d))
+        .collect();
+    dates.sort();
+    dates.dedup();
+    if dates.is_empty() {
+        return Err("no snapshot dates".to_string());
+    }
+    Ok(dates)
+}
+
+fn gunzip(bytes: &[u8]) -> Result<String, String> {
+    let mut text = String::new();
+    flate2::read::GzDecoder::new(bytes)
+        .read_to_string(&mut text)
+        .map_err(|e| format!("not a gzip-compressed text file ({e})"))?;
+    Ok(text)
+}
+
+/// Writes `bytes` to `path` through a temporary file in the same directory, so that readers
+/// never see a partial file.
+fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), P3mError> {
+    let dir = path.parent().expect("cache paths have a parent");
+    std::fs::create_dir_all(dir).map_err(io_err(dir))?;
+    // Unique per process and per call, so concurrent writers never share a temporary file.
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp = dir.join(format!(
+        ".{}.{}-{n}.tmp",
+        path.file_name().and_then(|f| f.to_str()).unwrap_or("file"),
+        std::process::id()
+    ));
+    std::fs::write(&tmp, bytes).map_err(io_err(&tmp))?;
+    std::fs::rename(&tmp, path).map_err(io_err(path))
+}
+
+/// One package in an index.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IndexEntry {
+    pub name: String,
+    pub version: Version,
+    /// The R versions the package supports, from `Depends: R (...)`.
+    pub r_constraint: Constraint,
+    /// `Depends` (without R), `Imports` and `LinkingTo`, in that order.
+    pub dependencies: Vec<Dependency>,
+    pub needs_compilation: bool,
+    /// `OS_type` (`unix` or `windows`), when the package is limited to one.
+    pub os_type: Option<String>,
+}
+
+/// A snapshot's package index.
+#[derive(Debug, Clone, Default)]
+pub struct Index {
+    pub date: String,
+    entries: HashMap<String, IndexEntry>,
+    /// Records that could not be read: (package, reason).
+    pub skipped: Vec<(String, String)>,
+}
+
+impl Index {
+    /// Parses PACKAGES text. Records with a `Path` field (R-devel's recommended packages) are
+    /// ignored; unreadable records are listed in `skipped`.
+    pub fn parse(date: &str, text: &str) -> Index {
+        let mut index = Index {
+            date: date.to_string(),
+            ..Default::default()
+        };
+        let records = match dcf::parse(text) {
+            Ok(r) => r,
+            Err(e) => {
+                index.skipped.push(("PACKAGES".to_string(), e.to_string()));
+                return index;
+            }
+        };
+        for rec in records {
+            if rec.get("Path").is_some() {
+                continue;
+            }
+            let name = rec.get("Package").unwrap_or("").to_string();
+            match entry_from_record(&rec) {
+                Ok(entry) => {
+                    let keep_existing = index
+                        .entries
+                        .get(&name)
+                        .is_some_and(|e| e.version >= entry.version);
+                    if !keep_existing {
+                        index.entries.insert(name, entry);
+                    }
+                }
+                Err(reason) => index.skipped.push((name, reason)),
+            }
+        }
+        index
+    }
+
+    pub fn get(&self, name: &str) -> Option<&IndexEntry> {
+        self.entries.get(name)
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &IndexEntry> {
+        self.entries.values()
+    }
+}
+
+fn entry_from_record(rec: &dcf::Record) -> Result<IndexEntry, String> {
+    let name = rec.get("Package").ok_or("no Package field")?;
+    if !dcf::is_package_name(name) {
+        return Err(format!("invalid package name `{name}`"));
+    }
+    let version = rec
+        .get("Version")
+        .ok_or("no Version field")?
+        .parse::<Version>()
+        .map_err(|e| e.to_string())?;
+    let mut r_constraint = Constraint::any();
+    let mut dependencies = Vec::new();
+    for field in ["Depends", "Imports", "LinkingTo"] {
+        let Some(value) = rec.get(field) else {
+            continue;
+        };
+        for dep in dcf::parse_dependencies(value).map_err(|e| format!("{field}: {e}"))? {
+            if dep.name == "R" {
+                r_constraint = r_constraint.and(&dep.constraint);
+            } else {
+                dependencies.push(dep);
+            }
+        }
+    }
+    Ok(IndexEntry {
+        name: name.to_string(),
+        version,
+        r_constraint,
+        dependencies,
+        needs_compilation: rec.get("NeedsCompilation") == Some("yes"),
+        os_type: rec.get("OS_type").map(str::to_string),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn dates(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn resolves_snapshot_dates() {
+        let d = dates(&["2017-10-10", "2024-01-09", "2024-01-12", "2026-10-05"]);
+        let today = "2026-10-06";
+        assert_eq!(resolve_date(&d, None, today).unwrap(), "2026-10-05");
+        assert_eq!(
+            resolve_date(&d, Some("2024-01-10"), today).unwrap(),
+            "2024-01-09"
+        );
+        assert_eq!(
+            resolve_date(&d, Some("2024-01-12"), today).unwrap(),
+            "2024-01-12"
+        );
+        assert_eq!(
+            resolve_date(&d, Some("2026-10-06"), today).unwrap(),
+            "2026-10-05"
+        );
+        // One day ahead of UTC is allowed (users east of UTC), two days is the future.
+        assert_eq!(
+            resolve_date(&d, Some("2026-10-07"), today).unwrap(),
+            "2026-10-05"
+        );
+        assert!(matches!(
+            resolve_date(&d, Some("2026-10-08"), today),
+            Err(SnapshotError::InFuture { .. })
+        ));
+        assert!(matches!(
+            resolve_date(&d, Some("2017-01-01"), today),
+            Err(SnapshotError::BeforeFirst { .. })
+        ));
+        assert!(matches!(
+            resolve_date(&d, Some("2026-02-30"), today),
+            Err(SnapshotError::InvalidDate(_))
+        ));
+        assert_eq!(
+            resolve_date(&[], None, today),
+            Err(SnapshotError::NoSnapshots)
+        );
+    }
+
+    #[test]
+    fn parses_transaction_dates() {
+        let body = br#"[{"repo_id":2,"alias":"2026-10-05","date":"2026-10-05T00:00:00Z"},{"alias":"2017-10-10"},{"alias":"latest"}]"#;
+        assert_eq!(parse_dates(body).unwrap(), ["2017-10-10", "2026-10-05"]);
+        assert!(parse_dates(b"[]").is_err());
+        assert!(parse_dates(b"<html>").is_err());
+    }
+
+    const PACKAGES: &str = "\
+Package: fixest
+Version: 0.14.2
+Depends: R (>= 3.5.0)
+Imports: stats, Rcpp (>= 1.0.5), dreamerr (>= 1.4.0)
+LinkingTo: Rcpp
+NeedsCompilation: yes
+License: GPL-3
+
+Package: boot
+Version: 1.3-31
+Priority: recommended
+Depends: R (>= 3.0.0), graphics, stats
+NeedsCompilation: no
+
+Package: boot
+Version: 1.3-32
+Priority: recommended
+Path: 4.7.0/Recommended
+NeedsCompilation: no
+
+Package: winonly
+Version: 1.0
+OS_type: windows
+
+Package: broken
+Version: one
+";
+
+    #[test]
+    fn parses_an_index() {
+        let index = Index::parse("2026-10-01", PACKAGES);
+        assert_eq!(index.len(), 3);
+        let fixest = index.get("fixest").unwrap();
+        assert_eq!(fixest.version.as_str(), "0.14.2");
+        assert_eq!(fixest.r_constraint.to_string(), ">= 3.5.0");
+        let deps: Vec<_> = fixest
+            .dependencies
+            .iter()
+            .map(|d| d.name.as_str())
+            .collect();
+        assert_eq!(deps, ["stats", "Rcpp", "dreamerr", "Rcpp"]);
+        assert!(fixest.needs_compilation);
+        // The R-devel copy of a recommended package (with `Path`) is ignored.
+        assert_eq!(index.get("boot").unwrap().version.as_str(), "1.3-31");
+        assert_eq!(
+            index.get("winonly").unwrap().os_type.as_deref(),
+            Some("windows")
+        );
+        assert_eq!(index.skipped.len(), 1);
+        assert_eq!(index.skipped[0].0, "broken");
+    }
+
+    #[test]
+    fn reads_index_from_cache_without_network() {
+        let t = tempfile::tempdir().unwrap();
+        let dirs = UserDirs {
+            data: t.path().join("data"),
+            cache: t.path().join("cache"),
+        };
+        // An unreachable server: only the cache can answer.
+        let p3m = P3m::new("http://127.0.0.1:9", Http::new(), &dirs);
+        let path = dirs
+            .p3m_cache()
+            .join("127.0.0.1_9/cran/2026-10-01/PACKAGES.gz");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        std::io::Write::write_all(&mut gz, PACKAGES.as_bytes()).unwrap();
+        std::fs::write(&path, gz.finish().unwrap()).unwrap();
+        let index = p3m.index("2026-10-01").unwrap();
+        assert_eq!(index.get("fixest").unwrap().version.as_str(), "0.14.2");
+        assert!(matches!(p3m.index("2026-10-02"), Err(P3mError::Http(_))));
+        assert!(matches!(
+            p3m.index("not-a-date"),
+            Err(P3mError::Snapshot(_))
+        ));
+        assert_eq!(
+            p3m.cran_url("2026-10-01"),
+            "http://127.0.0.1:9/cran/2026-10-01"
+        );
+    }
+
+    #[test]
+    fn falls_back_to_cached_dates_when_offline() {
+        let t = tempfile::tempdir().unwrap();
+        let dirs = UserDirs {
+            data: t.path().join("data"),
+            cache: t.path().join("cache"),
+        };
+        let p3m = P3m::new("http://127.0.0.1:9/", Http::new(), &dirs);
+        assert!(p3m.snapshot_dates(None).is_err());
+        let path = dirs.p3m_cache().join("127.0.0.1_9/transaction-dates.json");
+        write_atomic(&path, br#"[{"alias":"2026-10-01"},{"alias":"2026-10-02"}]"#).unwrap();
+        // Fresh cache: used without a request.
+        let fresh = p3m.snapshot_dates(None).unwrap();
+        assert_eq!((fresh.dates.len(), fresh.stale), (2, false));
+        // A date the cache covers is resolved from the cache.
+        assert_eq!(
+            p3m.resolve_snapshot(Some("2026-10-01")).unwrap().0,
+            "2026-10-01"
+        );
+    }
+}

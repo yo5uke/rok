@@ -151,7 +151,7 @@ impl Manifest {
                 )
             })?;
         let snapshot = required_str(project, "project.snapshot")?;
-        if !is_valid_date(snapshot) {
+        if !crate::date::is_valid(snapshot) {
             return Err(invalid(
                 "project.snapshot",
                 format!("expected a date such as `2026-10-04`, found `{snapshot}`"),
@@ -477,34 +477,6 @@ fn package_list(key: &str, v: &toml::Value) -> Result<Vec<String>, ManifestError
                 .ok_or_else(|| invalid(key, format!("not a valid R package name: {p}")))
         })
         .collect()
-}
-
-/// Whether `s` is a calendar date in `YYYY-MM-DD` form.
-pub fn is_valid_date(s: &str) -> bool {
-    let b = s.as_bytes();
-    if b.len() != 10 || b[4] != b'-' || b[7] != b'-' {
-        return false;
-    }
-    // Bytes 4 and 7 are ASCII `-`, so the slices below fall on character boundaries.
-    let num = |r: std::ops::Range<usize>| -> Option<u32> {
-        let part = &s[r];
-        part.bytes()
-            .all(|c| c.is_ascii_digit())
-            .then(|| part.parse().ok())
-            .flatten()
-    };
-    let (Some(y), Some(m), Some(d)) = (num(0..4), num(5..7), num(8..10)) else {
-        return false;
-    };
-    let leap = (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
-    let days = match m {
-        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
-        4 | 6 | 9 | 11 => 30,
-        2 if leap => 29,
-        2 => 28,
-        _ => return false,
-    };
-    (1..=days).contains(&d)
 }
 
 impl DependencySpec {
@@ -912,14 +884,5 @@ suggest = ["officer", "flextable"]
         doc.set_dependency("fixest", &DependencySpec::cran(Constraint::any()));
         let m = Manifest::parse(&doc.to_string()).unwrap();
         assert_eq!(m.dependencies.len(), 1);
-    }
-
-    #[test]
-    fn validates_dates() {
-        assert!(is_valid_date("2024-02-29"));
-        assert!(!is_valid_date("2023-02-29"));
-        assert!(!is_valid_date("2026-13-01"));
-        assert!(!is_valid_date("2026-1-01"));
-        assert!(!is_valid_date("26-10-04xx"));
     }
 }

@@ -18,6 +18,7 @@ rok は、Python の uv に着想を得た、R 向けの高速なパッケージ
 ## 検証コマンド
 
 - Rust：`cargo fmt --check`、`cargo clippy --all-targets -- -D warnings`、`cargo test`
+- Rust（ネットワークを使うテスト。P3M などに関わる変更のとき）：`cargo test -p rok-core -- --ignored`
 - R パッケージ：`R CMD build rpkg` の後、生成された tar.gz に `R CMD check --as-cran`
 
 コマンドが増えたら、ここに追記する。

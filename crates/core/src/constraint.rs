@@ -92,6 +92,12 @@ impl Constraint {
         self.clauses.iter().all(|c| c.matches(v))
     }
 
+    /// The constraint that requires both `self` and `other`.
+    pub fn and(mut self, other: &Constraint) -> Constraint {
+        self.clauses.extend(other.clauses.iter().cloned());
+        self
+    }
+
     /// Parses the part of a DESCRIPTION dependency inside the parentheses, such as `>= 1.0`.
     pub fn parse_clause(s: &str) -> Result<Clause, ParseConstraintError> {
         Self::parse_clause_with(s, |v| v.parse())
@@ -223,6 +229,15 @@ mod tests {
         assert!(c("0.12.1").matches(&v("0.12-1")));
         assert!(c("*").matches(&v("99.0")));
         assert!(!c("!= 1.0").matches(&v("1.0")));
+    }
+
+    #[test]
+    fn combines_constraints() {
+        let both = c(">= 1.0").and(&c("< 2.0"));
+        assert_eq!(both.to_string(), ">= 1.0, < 2.0");
+        assert!(both.matches(&v("1.5")));
+        assert!(!both.matches(&v("2.0")));
+        assert_eq!(Constraint::any().and(&Constraint::any()), Constraint::any());
     }
 
     #[test]

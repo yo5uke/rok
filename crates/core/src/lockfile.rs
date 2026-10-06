@@ -10,7 +10,6 @@ use std::collections::BTreeMap;
 use serde::Deserialize;
 
 use crate::constraint::Constraint;
-use crate::manifest::is_valid_date;
 use crate::version::Version;
 
 /// File name of the lockfile.
@@ -159,7 +158,7 @@ impl Lockfile {
             raw.r.version.parse().map_err(|_| {
                 invalid(format!("`r.version`: invalid version `{}`", raw.r.version))
             })?;
-        if !is_valid_date(&raw.snapshot.date) {
+        if !crate::date::is_valid(&raw.snapshot.date) {
             return Err(invalid(format!(
                 "`snapshot.date`: invalid date `{}`",
                 raw.snapshot.date
@@ -183,7 +182,7 @@ impl Lockfile {
                 ))
             })?;
             if let Some(date) = &p.source.snapshot
-                && !is_valid_date(date)
+                && !crate::date::is_valid(date)
             {
                 return Err(invalid(format!(
                     "package `{}`: invalid snapshot date `{date}`",
