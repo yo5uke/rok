@@ -149,6 +149,22 @@ impl Platform {
         self.distro.as_ref().and_then(LinuxDistro::p3m_name)
     }
 
+    /// The name of the platform's directory in a project library, for example
+    /// `ubuntu-24.04-x86_64`. It uses `ID` and `VERSION_ID` from `/etc/os-release` as they are,
+    /// so the R side (`activate.R`) can compute the same name without a lookup table.
+    pub fn library_tag(&self) -> String {
+        let arch = self.arch.r_name();
+        match (self.os, &self.distro) {
+            (Os::Linux, Some(d)) if !d.id.is_empty() && !d.version_id.is_empty() => {
+                format!("{}-{}-{arch}", d.id, d.version_id)
+            }
+            (Os::Linux, Some(d)) if !d.id.is_empty() => format!("{}-{arch}", d.id),
+            (Os::Linux, _) => format!("linux-{arch}"),
+            (Os::Windows, _) => format!("windows-{arch}"),
+            (Os::MacOs, _) => format!("macos-{arch}"),
+        }
+    }
+
     /// `R.version$platform`, for example `x86_64-pc-linux-gnu`.
     pub fn r_platform(&self) -> &'static str {
         match (self.os, self.arch) {
@@ -256,5 +272,14 @@ mod tests {
             "R (4.4.2 aarch64-unknown-linux-gnu aarch64 linux-gnu)"
         );
         assert_eq!(p.to_string(), "Ubuntu 24.04.5 LTS (x86_64)");
+        assert_eq!(p.library_tag(), "ubuntu-24.04-x86_64");
+        assert_eq!(
+            Platform {
+                distro: None,
+                ..p.clone()
+            }
+            .library_tag(),
+            "linux-x86_64"
+        );
     }
 }

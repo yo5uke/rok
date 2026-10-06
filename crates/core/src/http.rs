@@ -16,7 +16,7 @@ pub enum HttpError {
     Transport {
         url: String,
         #[source]
-        source: ureq::Error,
+        source: Box<ureq::Error>,
     },
 }
 
@@ -41,6 +41,8 @@ impl Head {
 #[derive(Debug, Clone)]
 pub struct Http {
     agent: ureq::Agent,
+    /// The same settings, but redirects are returned instead of followed.
+    no_redirect: ureq::Agent,
 }
 
 impl Default for Http {
@@ -51,15 +53,19 @@ impl Default for Http {
 
 impl Http {
     pub fn new() -> Http {
-        let config = ureq::Agent::config_builder()
-            .user_agent(format!("rok/{}", env!("CARGO_PKG_VERSION")))
-            .timeout_connect(Some(Duration::from_secs(30)))
-            .timeout_global(Some(Duration::from_secs(600)))
-            .proxy(ureq::Proxy::try_from_env())
-            .http_status_as_error(false)
-            .build();
+        let config = |max_redirects: u32| {
+            ureq::Agent::config_builder()
+                .user_agent(format!("rok/{}", env!("CARGO_PKG_VERSION")))
+                .timeout_connect(Some(Duration::from_secs(30)))
+                .timeout_global(Some(Duration::from_secs(600)))
+                .proxy(ureq::Proxy::try_from_env())
+                .http_status_as_error(false)
+                .max_redirects(max_redirects)
+                .build()
+        };
         Http {
-            agent: config.into(),
+            agent: config(10).into(),
+            no_redirect: config(0).into(),
         }
     }
 
@@ -67,7 +73,7 @@ impl Http {
     pub fn get_bytes(&self, url: &str, user_agent: Option<&str>) -> Result<Vec<u8>, HttpError> {
         let transport = |source| HttpError::Transport {
             url: url.to_string(),
-            source,
+            source: Box::new(source),
         };
         let mut req = self.agent.get(url);
         if let Some(ua) = user_agent {
@@ -94,9 +100,27 @@ impl Http {
         if let Some(ua) = user_agent {
             req = req.header("User-Agent", ua);
         }
-        let resp = req.call().map_err(|source| HttpError::Transport {
+        Self::head_of(url, req.call())
+    }
+
+    /// GET `url` without following a redirect, returning the status and headers only. P3M
+    /// answers a package request with a redirect whose headers say whether the file is a
+    /// binary; this reads them in one round trip.
+    pub fn get_headers(&self, url: &str, user_agent: Option<&str>) -> Result<Head, HttpError> {
+        let mut req = self.no_redirect.get(url);
+        if let Some(ua) = user_agent {
+            req = req.header("User-Agent", ua);
+        }
+        Self::head_of(url, req.call())
+    }
+
+    fn head_of(
+        url: &str,
+        result: Result<ureq::http::Response<ureq::Body>, ureq::Error>,
+    ) -> Result<Head, HttpError> {
+        let resp = result.map_err(|source| HttpError::Transport {
             url: url.to_string(),
-            source,
+            source: Box::new(source),
         })?;
         let headers = resp
             .headers()

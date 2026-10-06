@@ -14,6 +14,18 @@ use crate::version::Version;
 /// File name of the manifest.
 pub const FILE_NAME: &str = "rok.toml";
 
+/// The manifest of a new project.
+pub fn new_manifest_text(name: &str, r: &Version, snapshot: &str) -> String {
+    let mut doc = toml_edit::DocumentMut::new();
+    let mut project = toml_edit::Table::new();
+    project["name"] = toml_edit::value(name);
+    project["r"] = toml_edit::value(r.as_str());
+    project["snapshot"] = toml_edit::value(snapshot);
+    doc["project"] = toml_edit::Item::Table(project);
+    doc["dependencies"] = toml_edit::Item::Table(toml_edit::Table::new());
+    doc.to_string()
+}
+
 /// A validated manifest.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Manifest {
@@ -875,6 +887,19 @@ suggest = ["officer", "flextable"]
         assert!(out.contains("arrow = { env = { LIBARROW_BINARY = \"true\" } }"));
         let m = Manifest::parse(&out).unwrap();
         assert_eq!(m.dependency("arrow").unwrap().env.len(), 1);
+    }
+
+    #[test]
+    fn writes_a_new_manifest() {
+        let text = new_manifest_text("my-analysis", &"4.6".parse().unwrap(), "2026-10-05");
+        assert_eq!(
+            text,
+            "[project]\nname = \"my-analysis\"\nr = \"4.6\"\nsnapshot = \"2026-10-05\"\n\n[dependencies]\n"
+        );
+        // Names with quotes are escaped (toml_edit may choose a literal string).
+        let text = new_manifest_text("my \"analysis\"", &"4.6".parse().unwrap(), "2026-10-05");
+        let m = Manifest::parse(&text).unwrap();
+        assert_eq!(m.project.name, "my \"analysis\"");
     }
 
     #[test]

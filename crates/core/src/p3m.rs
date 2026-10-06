@@ -25,6 +25,30 @@ pub const DEFAULT_URL: &str = "https://packagemanager.posit.co";
 /// How long a downloaded list of snapshot dates is used before it is fetched again.
 const DATES_MAX_AGE: Duration = Duration::from_secs(60 * 60);
 
+/// How long P3M's information about a package is used before it is fetched again.
+const PACKAGE_INFO_MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// The part of `/__api__/repos/cran/packages/<name>` that rok uses.
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
+struct PackageInfo {
+    version: String,
+    #[serde(default)]
+    checksum: String,
+    date_publication: Option<String>,
+    #[serde(default, deserialize_with = "null_as_empty")]
+    archived: Vec<ArchivedRelease>,
+}
+
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
+struct ArchivedRelease {
+    version: String,
+    date_publication: Option<String>,
+}
+
+fn null_as_empty<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<ArchivedRelease>, D::Error> {
+    Ok(Option::<Vec<ArchivedRelease>>::deserialize(d)?.unwrap_or_default())
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum P3mError {
     #[error(transparent)]
@@ -136,9 +160,118 @@ impl P3m {
         }
     }
 
+    /// The base of dated CRAN snapshots (`<server>/cran`), as written to lockfiles.
+    pub fn cran_base(&self) -> String {
+        format!("{}/cran", self.base)
+    }
+
     /// The CRAN repository URL for a snapshot date, as written to lockfiles.
     pub fn cran_url(&self, date: &str) -> String {
         format!("{}/cran/{date}", self.base)
+    }
+
+    /// The URL of a package for a Linux distribution (`noble`, ...). P3M serves a binary for
+    /// the R version in the User-Agent when it has one, and the source otherwise (V3).
+    pub fn linux_package_url(
+        &self,
+        distro: &str,
+        date: &str,
+        name: &str,
+        version: &Version,
+    ) -> String {
+        format!(
+            "{}/cran/__linux__/{distro}/{date}/src/contrib/{name}_{version}.tar.gz",
+            self.base
+        )
+    }
+
+    /// The URL of a package's source as P3M serves it (with `Repository: RSPM` added, so it
+    /// is not byte-identical to CRAN's file).
+    pub fn source_url(&self, date: &str, name: &str, version: &Version) -> String {
+        format!(
+            "{}/src/contrib/{name}_{version}.tar.gz",
+            self.cran_url(date)
+        )
+    }
+
+    /// The SHA-256 of CRAN's source tarball of `name` `version`, if P3M knows it. P3M's package
+    /// API returns the checksum of the current CRAN version only (V3), so older versions give
+    /// `None`. Known checksums are cached forever.
+    pub fn source_checksum(
+        &self,
+        name: &str,
+        version: &Version,
+    ) -> Result<Option<String>, P3mError> {
+        let path = self
+            .cache
+            .join("checksums")
+            .join(name)
+            .join(version.as_str());
+        if let Ok(h) = std::fs::read_to_string(&path) {
+            return Ok(Some(h.trim().to_string()));
+        }
+        let Some(info) = self.package_info(name)? else {
+            return Ok(None);
+        };
+        let valid =
+            info.checksum.len() == 64 && info.checksum.bytes().all(|b| b.is_ascii_hexdigit());
+        if info.version.parse::<Version>().ok().as_ref() != Some(version) || !valid {
+            return Ok(None);
+        }
+        write_atomic(&path, info.checksum.as_bytes())?;
+        Ok(Some(info.checksum))
+    }
+
+    /// The CRAN releases of a package with their publication times (UTC, RFC 3339), oldest
+    /// first. Releases without a publication time are left out (V10).
+    pub fn history(&self, name: &str) -> Result<Vec<(Version, String)>, P3mError> {
+        let Some(info) = self.package_info(name)? else {
+            return Ok(Vec::new());
+        };
+        let mut out: Vec<(Version, String)> =
+            std::iter::once((info.version, info.date_publication))
+                .chain(
+                    info.archived
+                        .into_iter()
+                        .map(|a| (a.version, a.date_publication)),
+                )
+                .filter_map(|(v, d)| Some((v.parse().ok()?, d?)))
+                .collect();
+        out.sort_by(|a, b| a.1.cmp(&b.1));
+        Ok(out)
+    }
+
+    /// P3M's information about a package (current version, its checksum, and the archived
+    /// releases), cached for a day. `None` if P3M does not know the package. If P3M cannot be
+    /// reached, an older cached copy is used.
+    fn package_info(&self, name: &str) -> Result<Option<PackageInfo>, P3mError> {
+        let path = self.cache.join("packages").join(format!("{name}.json"));
+        let cached = std::fs::read(&path)
+            .ok()
+            .and_then(|b| serde_json::from_slice::<PackageInfo>(&b).ok());
+        let age = std::fs::metadata(&path)
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| SystemTime::now().duration_since(t).ok());
+        if let (Some(info), Some(age)) = (&cached, age)
+            && age < PACKAGE_INFO_MAX_AGE
+        {
+            return Ok(Some(info.clone()));
+        }
+        let url = format!("{}/__api__/repos/cran/packages/{name}", self.base);
+        let body = match self.http.get_bytes(&url, None) {
+            Ok(b) => b,
+            Err(HttpError::Status { status: 404, .. }) => return Ok(None),
+            Err(e) => return cached.map(Some).ok_or(e.into()),
+        };
+        let info: PackageInfo = serde_json::from_slice(&body).map_err(|e| P3mError::Response {
+            url: url.clone(),
+            message: e.to_string(),
+        })?;
+        // Keep only the fields rok uses; the full response lists every reverse dependency.
+        let slim = serde_json::to_vec(&info).expect("serializable");
+        write_atomic(&path, &slim)?;
+        Ok(Some(info))
     }
 
     /// The published snapshot dates. A cached list is used when it is less than an hour old, or
@@ -251,21 +384,8 @@ fn gunzip(bytes: &[u8]) -> Result<String, String> {
     Ok(text)
 }
 
-/// Writes `bytes` to `path` through a temporary file in the same directory, so that readers
-/// never see a partial file.
 fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), P3mError> {
-    let dir = path.parent().expect("cache paths have a parent");
-    std::fs::create_dir_all(dir).map_err(io_err(dir))?;
-    // Unique per process and per call, so concurrent writers never share a temporary file.
-    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let tmp = dir.join(format!(
-        ".{}.{}-{n}.tmp",
-        path.file_name().and_then(|f| f.to_str()).unwrap_or("file"),
-        std::process::id()
-    ));
-    std::fs::write(&tmp, bytes).map_err(io_err(&tmp))?;
-    std::fs::rename(&tmp, path).map_err(io_err(path))
+    crate::fsutil::write_atomic(path, bytes).map_err(io_err(path))
 }
 
 /// One package in an index.

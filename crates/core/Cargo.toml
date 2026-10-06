@@ -17,6 +17,6 @@ ureq.workspace = true
 flate2.workspace = true
 serde_json.workspace = true
 pubgrub.workspace = true
-
-[dev-dependencies]
+tar.workspace = true
+sha2.workspace = true
 tempfile.workspace = true
