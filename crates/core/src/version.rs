@@ -40,6 +40,24 @@ impl Version {
         &self.text
     }
 
+    /// Parses a version used as a bound in a manifest constraint. Besides normal versions,
+    /// a single number is accepted and treated as `<number>.0` (so `< 2` means `< 2.0`),
+    /// while keeping the text as written. Real R versions have at least two components, so
+    /// no version lies between `2` and `2.0`, and the result of any comparison is unchanged.
+    pub fn parse_bound(s: &str) -> Result<Self, ParseVersionError> {
+        let text = s.trim();
+        if !text.is_empty() && text.bytes().all(|b| b.is_ascii_digit()) {
+            let major = text
+                .parse::<u64>()
+                .map_err(|_| ParseVersionError(s.to_string()))?;
+            return Ok(Version {
+                parts: vec![major, 0],
+                text: text.to_string(),
+            });
+        }
+        text.parse()
+    }
+
     /// The first two components joined by `.`, for example `4.4` for R `4.4.2`.
     pub fn minor(&self) -> String {
         format!("{}.{}", self.parts[0], self.parts[1])
@@ -143,6 +161,19 @@ mod tests {
         assert!(v("1.18.6.1") > v("1.18.6"));
         assert_eq!(v("1.0-1"), v("1.0.1"));
         assert_eq!(v("1.01"), v("1.1"));
+    }
+
+    #[test]
+    fn parses_single_number_bounds() {
+        let two = Version::parse_bound("2").unwrap();
+        assert_eq!(two.to_string(), "2");
+        assert_eq!(two, v("2.0"));
+        assert!(v("1.99.9") < two && two < v("2.0.1"));
+        assert_eq!(Version::parse_bound("0.13").unwrap(), v("0.13"));
+        assert!(Version::parse_bound("").is_err());
+        assert!(Version::parse_bound("2.").is_err());
+        // Plain parsing stays strict, as in DESCRIPTION files.
+        assert!("2".parse::<Version>().is_err());
     }
 
     #[test]
