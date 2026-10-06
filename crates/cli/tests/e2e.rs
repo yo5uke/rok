@@ -16,7 +16,11 @@ fn rok(home: &Path, args: &[&str]) -> Output {
 }
 
 fn json(out: &Output) -> serde_json::Value {
-    assert!(out.status.success(), "rok failed:\n{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "rok failed:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     serde_json::from_slice(&out.stdout).expect("JSON on stdout")
 }
 
@@ -35,9 +39,33 @@ fn init_add_sync_remove() {
 
     let added = json(&rok(home, &["--project", "proj", "add", "R6", "--json"]));
     assert_eq!(added["changes"][0]["name"], "R6");
-    let lib = std::fs::read_dir(proj.join(".rok/library")).unwrap().next().unwrap().unwrap().path();
-    let lib = std::fs::read_dir(&lib).unwrap().next().unwrap().unwrap().path();
-    assert!(lib.join("R6/DESCRIPTION").is_file(), "R6 is not in {}", lib.display());
+    let lib = std::fs::read_dir(proj.join(".rok/library"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let lib = std::fs::read_dir(&lib)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    assert!(
+        lib.join("R6/DESCRIPTION").is_file(),
+        "R6 is not in {}",
+        lib.display()
+    );
+
+    // status: in sync (exit 0); why and tree read the lockfile.
+    assert!(rok(&proj, &["status", "--check"]).status.success());
+    let why = rok(&proj, &["why", "R6"]);
+    assert_eq!(
+        String::from_utf8_lossy(&why.stdout).trim(),
+        "R6 2.6.1 (declared)"
+    );
+    let tree = rok(&proj, &["tree"]);
+    assert!(String::from_utf8_lossy(&tree.stdout).starts_with("R6 "));
 
     // In sync: `--locked` passes. After a hand edit it fails without touching rok.lock.
     assert!(rok(&proj, &["sync", "--locked"]).status.success());
@@ -48,7 +76,10 @@ fn init_add_sync_remove() {
     let locked = rok(&proj, &["sync", "--locked"]);
     assert!(!locked.status.success());
     assert!(String::from_utf8_lossy(&locked.stderr).contains("out of date"));
-    assert_eq!(std::fs::read_to_string(proj.join("rok.lock")).unwrap(), lock_before);
+    assert_eq!(
+        std::fs::read_to_string(proj.join("rok.lock")).unwrap(),
+        lock_before
+    );
     let synced = json(&rok(&proj, &["sync", "--json"]));
     assert_eq!(synced["changes"][0]["name"], "jsonlite");
 
@@ -59,4 +90,13 @@ fn init_add_sync_remove() {
 
     let not_declared = rok(&proj, &["remove", "R6"]);
     assert!(!not_declared.status.success());
+
+    // undo restores the state before `remove`.
+    let undone = json(&rok(&proj, &["undo", "--json"]));
+    assert_eq!(undone["changes"].as_array().unwrap().len(), 2);
+    assert!(lib.join("R6/DESCRIPTION").is_file());
+    assert!(
+        !rok(&proj, &["undo"]).status.success(),
+        "a second undo has nothing to undo"
+    );
 }

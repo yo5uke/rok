@@ -149,11 +149,33 @@ pub fn lock_is_current(manifest: &Manifest, lock: &Lockfile) -> bool {
 /// Resolves the manifest into a lockfile. Versions in `old` are kept when allowed; their
 /// SHA-256 values are carried over, and missing ones are looked up on P3M (case B: only the
 /// current CRAN version has one).
+/// How much of the old lockfile a resolution keeps.
+#[derive(Debug, Clone, Default)]
+pub struct Keep {
+    /// Packages whose locked version is not preferred (`rok update <package>`).
+    pub unlock: HashSet<String>,
+    /// Ignore the old versions altogether (`rok update` without packages).
+    pub nothing: bool,
+    /// A later snapshot to offer newer versions from (`rok update <package>`).
+    pub newer: Option<String>,
+}
+
 pub fn resolve_lock(
     env: &Env,
     manifest: &Manifest,
     old: Option<&Lockfile>,
     r_version: &Version,
+) -> Result<Lockfile, OpError> {
+    resolve_lock_with(env, manifest, old, r_version, &Keep::default())
+}
+
+/// [`resolve_lock`] with control over what is kept from `old` (see [`Keep`]).
+pub fn resolve_lock_with(
+    env: &Env,
+    manifest: &Manifest,
+    old: Option<&Lockfile>,
+    r_version: &Version,
+    keep: &Keep,
 ) -> Result<Lockfile, OpError> {
     let mut requirements = Vec::new();
     for (name, spec) in &manifest.dependencies {
@@ -176,13 +198,16 @@ pub fn resolve_lock(
     let date = &manifest.project.snapshot;
     let mut preferred = HashMap::new();
     let mut locked = HashMap::new();
-    for p in old.map(|l| l.packages.as_slice()).unwrap_or_default() {
+    let kept = if keep.nothing { None } else { old };
+    for p in kept.map(|l| l.packages.as_slice()).unwrap_or_default() {
         let Source::Repository {
             repository,
             snapshot,
         } = &p.source;
         if repository == "cran" {
-            preferred.insert(p.name.clone(), p.version.clone());
+            if !keep.unlock.contains(&p.name) {
+                preferred.insert(p.name.clone(), p.version.clone());
+            }
             if let Some(d) = snapshot {
                 locked.insert(p.name.clone(), (p.version.clone(), d.clone()));
             }
@@ -198,6 +223,9 @@ pub fn resolve_lock(
         .map(|(name, _)| name.clone())
         .collect();
     let mut source = SnapshotSource::new(date, load, locked);
+    if let Some(newer) = &keep.newer {
+        source = source.with_newer(newer);
+    }
     if !historical.is_empty() {
         let dates = env.p3m.snapshot_dates(Some(date))?.dates;
         source = source.with_history(dates, historical, |name: &str| {

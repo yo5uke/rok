@@ -366,6 +366,8 @@ pub struct SnapshotSource<'a> {
     indexes: RefCell<HashMap<String, Rc<Index>>>,
     locked: HashMap<String, (Version, String)>,
     history: Option<History<'a>>,
+    /// A later snapshot whose versions are also offered (`rok update <package>`).
+    newer: Option<String>,
 }
 
 struct History<'a> {
@@ -388,7 +390,15 @@ impl<'a> SnapshotSource<'a> {
             indexes: RefCell::new(HashMap::new()),
             locked,
             history: None,
+            newer: None,
         }
+    }
+
+    /// Also offers each package's version in the snapshot of `date` (later than the project's).
+    /// With the other packages' locked versions preferred, only what must move moves.
+    pub fn with_newer(mut self, date: &str) -> Self {
+        self.newer = Some(date.to_string());
+        self
     }
 
     /// Also offers the older releases of `packages`. `fetch` returns a package's releases with
@@ -429,6 +439,12 @@ impl CandidateSource for SnapshotSource<'_> {
             && out.iter().all(|(v, _)| v != version)
         {
             out.push((version.clone(), date.clone()));
+        }
+        if let Some(newer) = &self.newer
+            && let Some(entry) = self.index(newer)?.get(name)
+            && out.iter().all(|(v, _)| v != &entry.version)
+        {
+            out.push((entry.version.clone(), newer.clone()));
         }
         if let Some(h) = &self.history
             && h.packages.contains(name)
@@ -962,6 +978,52 @@ mod tests {
         assert!(
             err.contains("rok.lock records b 1.0 from the 2025-01-02 snapshot"),
             "{err}"
+        );
+    }
+
+    #[test]
+    fn updates_one_package_and_only_the_dependencies_it_needs() {
+        // Project snapshot: sf 1.0 (needs units >= 0.8), units 0.8, s2 1.0.
+        // Newer snapshot: sf 1.1 (needs units >= 0.9), units 0.9, s2 1.1.
+        let indexes = |date: &str| -> Result<Index, SourceError> {
+            Ok(Index::parse(
+                date,
+                match date {
+                    "2026-01-01" => {
+                        "Package: sf\nVersion: 1.0\nImports: units (>= 0.8), s2\n\nPackage: units\nVersion: 0.8\n\nPackage: s2\nVersion: 1.0\n"
+                    }
+                    _ => {
+                        "Package: sf\nVersion: 1.1\nImports: units (>= 0.9), s2\n\nPackage: units\nVersion: 0.9\n\nPackage: s2\nVersion: 1.1\n"
+                    }
+                },
+            ))
+        };
+        let lock = |n: &str, v: &str| {
+            (
+                n.to_string(),
+                (v.parse().unwrap(), "2026-01-01".to_string()),
+            )
+        };
+        let locked = HashMap::from([lock("sf", "1.0"), lock("units", "0.8"), lock("s2", "1.0")]);
+        let source = SnapshotSource::new("2026-01-01", indexes, locked).with_newer("2026-10-01");
+        let mut req = request(&[("sf", "*")]);
+        req.preferred = HashMap::from([
+            ("units".into(), "0.8".parse().unwrap()),
+            ("s2".into(), "1.0".parse().unwrap()),
+        ]);
+        let got: Vec<String> = resolve(&source, &req)
+            .unwrap()
+            .iter()
+            .map(|r| format!("{} {} {}", r.name, r.version, r.date))
+            .collect();
+        // sf moves; units must move for it; s2 stays.
+        assert_eq!(
+            got,
+            [
+                "s2 1.0 2026-01-01",
+                "sf 1.1 2026-10-01",
+                "units 0.9 2026-10-01"
+            ]
         );
     }
 

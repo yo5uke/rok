@@ -20,6 +20,7 @@ const RED: &str = "31";
 const YELLOW: &str = "33";
 const BLUE: &str = "34";
 const CYAN: &str = "36";
+const BOLD_YELLOW: &str = "1;33";
 
 impl Ui {
     pub fn new(yes: bool, json: bool) -> Ui {
@@ -41,6 +42,11 @@ impl Ui {
 
     fn line(&self, s: &str) {
         let _ = writeln!(std::io::stderr(), "{s}");
+    }
+
+    /// A line without a symbol.
+    pub fn line_plain(&self, msg: &str) {
+        self.line(msg);
     }
 
     pub fn success(&self, msg: &str) {
@@ -74,14 +80,21 @@ impl Ui {
         self.line(&format!("  {msg}"));
     }
 
-    /// Lists changed packages: `+` added, `-` removed, `↑` upgraded, `↓` downgraded.
+    /// Lists changed packages: `+` added, `-` removed, `↑` upgraded, `↓` downgraded. A new
+    /// major version is marked, since it may break code.
     pub fn changes(&self, changes: &[Change]) {
         for c in changes {
             let s = match (&c.from, &c.to) {
                 (None, Some(to)) => format!("{} {} {to}", self.paint(GREEN, "+"), c.name),
                 (Some(from), None) => format!("{} {} {from}", self.paint(RED, "-"), c.name),
                 (Some(from), Some(to)) if to > from => {
-                    format!("{} {} {from} → {to}", self.paint(BLUE, "↑"), c.name)
+                    let major = to.parts()[0] > from.parts()[0];
+                    let mark = if major {
+                        format!(" {}", self.paint(BOLD_YELLOW, "(new major version)"))
+                    } else {
+                        String::new()
+                    };
+                    format!("{} {} {from} → {to}{mark}", self.paint(BLUE, "↑"), c.name)
                 }
                 (Some(from), Some(to)) => {
                     format!("{} {} {from} → {to}", self.paint(YELLOW, "↓"), c.name)
@@ -89,6 +102,23 @@ impl Ui {
                 (None, None) => continue,
             };
             self.line(&format!("  {s}"));
+        }
+    }
+
+    /// A package kept at its version, with the reason.
+    pub fn held(&self, name: &str, version: &str, reason: &str) {
+        self.line(&format!(
+            "  {} {name} {version} ({reason})",
+            self.paint(CYAN, "=")
+        ));
+    }
+
+    /// The symbol for a status level.
+    pub fn level(&self, level: rok_core::status::Level, msg: &str) {
+        match level {
+            rok_core::status::Level::Error => self.error(msg),
+            rok_core::status::Level::Warning => self.warn(msg),
+            rok_core::status::Level::Info => self.info(msg),
         }
     }
 

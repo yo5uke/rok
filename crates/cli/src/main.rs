@@ -57,6 +57,43 @@ enum Command {
         #[arg(long)]
         locked: bool,
     },
+    /// Move the snapshot forward and resolve again, or update only the given packages.
+    Update {
+        /// Update only these packages (and what they need), keeping the project's snapshot.
+        #[arg(value_name = "PACKAGE")]
+        packages: Vec<String>,
+        /// The snapshot date to move to (default: the latest published one).
+        #[arg(long, value_name = "DATE")]
+        to: Option<String>,
+        /// Show what would change without changing anything.
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Undo the last add, remove or update.
+    Undo,
+    /// Show what is out of sync, without using the network.
+    Status {
+        /// List every package.
+        #[arg(long)]
+        packages: bool,
+        /// Exit with status 1 if there is something to fix.
+        #[arg(long)]
+        check: bool,
+    },
+    /// Show why a package is installed.
+    Why {
+        #[arg(value_name = "PACKAGE")]
+        package: String,
+    },
+    /// Show the dependency tree.
+    Tree {
+        /// Show only this package's dependencies.
+        #[arg(value_name = "PACKAGE")]
+        package: Option<String>,
+        /// How many levels to show.
+        #[arg(long, value_name = "N")]
+        depth: Option<usize>,
+    },
 }
 
 fn main() -> ExitCode {
@@ -68,6 +105,18 @@ fn main() -> ExitCode {
         Command::Add { packages, version } => commands::add(&ui, project, &packages, version),
         Command::Remove { packages } => commands::remove(&ui, project, &packages),
         Command::Sync { locked } => commands::sync(&ui, project, locked),
+        Command::Update {
+            packages,
+            to,
+            dry_run,
+        } => commands::update(&ui, project, &packages, to, dry_run),
+        Command::Undo => commands::undo(&ui, project),
+        Command::Status { packages, check } => match commands::status(&ui, project, packages) {
+            Ok(true) if check => return ExitCode::FAILURE,
+            other => other.map(|_| ()),
+        },
+        Command::Why { package } => commands::why(&ui, project, &package),
+        Command::Tree { package, depth } => commands::tree(&ui, project, package, depth),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,

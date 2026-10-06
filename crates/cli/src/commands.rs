@@ -456,3 +456,310 @@ pub fn sync(ui: &Ui, project_dir: Option<&Path>, locked: bool) -> anyhow::Result
     ui.result(report_json("sync", &changes, &report));
     Ok(())
 }
+
+// ---- update ----
+
+pub fn update(
+    ui: &Ui,
+    project_dir: Option<&Path>,
+    packages: &[String],
+    to: Option<String>,
+    dry_run: bool,
+) -> anyhow::Result<()> {
+    let start = Instant::now();
+    let project = find_project(project_dir)?;
+    let (mut doc, manifest) = project.read_manifest()?;
+    let old_lock = project
+        .read_lock()?
+        .ok_or_else(|| anyhow::anyhow!("rok.lock is missing; run `rok sync` first."))?;
+    let env = Env::from_env()?;
+    let r = project_r(ui, &env, &manifest, Some(&old_lock))?;
+    let lock_r = if old_lock.r.minor() == r.version.minor() {
+        old_lock.r.clone()
+    } else {
+        r.version.clone()
+    };
+    let (target, dates) = env.p3m.resolve_snapshot(to.as_deref())?;
+    if dates.stale {
+        ui.warn("Could not reach P3M; using the snapshot dates cached earlier.");
+    }
+    if let Some(t) = &to
+        && *t != target
+    {
+        ui.info(&format!(
+            "{t} is not a snapshot date; using the snapshot of {target}."
+        ));
+    }
+    let current = manifest.project.snapshot.clone();
+    let moving_back = packages.is_empty() && target < current;
+
+    ui.step("Resolving dependencies");
+    let (new_manifest, lock) = if packages.is_empty() {
+        if moving_back {
+            ui.warn(&format!("This moves the snapshot back from {current} to {target}; packages may be downgraded."));
+        } else if target == current {
+            ui.info(&format!("The snapshot is already {target}."));
+        } else {
+            ui.info(&format!("Moving the snapshot from {current} to {target}."));
+        }
+        doc.set_snapshot(&target);
+        let m = Manifest::parse(&doc.to_string())?;
+        let keep = ops::Keep {
+            nothing: true,
+            ..Default::default()
+        };
+        let lock = ops::resolve_lock_with(&env, &m, Some(&old_lock), &lock_r, &keep)?;
+        (m, lock)
+    } else {
+        for p in packages {
+            if old_lock.package(p).is_none() {
+                bail!("{p} is not in rok.lock.");
+            }
+        }
+        let keep = ops::Keep {
+            unlock: packages.iter().cloned().collect(),
+            newer: Some(target.clone()),
+            ..Default::default()
+        };
+        let lock = ops::resolve_lock_with(&env, &manifest, Some(&old_lock), &lock_r, &keep)?;
+        (manifest.clone(), lock)
+    };
+
+    let changes = ops::diff(Some(&old_lock), &lock);
+    if changes.is_empty() {
+        ui.info("No package versions change.");
+    } else {
+        ui.changes(&changes);
+    }
+    // Declared constraints that keep a package below the newest version (requirements: shown
+    // so that a held-back package is never a surprise).
+    let newest = env.p3m.index(&target)?;
+    for (name, spec) in &new_manifest.dependencies {
+        if let manifest::DependencySource::Cran { constraint } = &spec.source
+            && let (Some(locked), Some(entry)) = (lock.package(name), newest.get(name))
+            && !constraint.matches(&entry.version)
+            && locked.version != entry.version
+        {
+            ui.held(
+                name,
+                locked.version.as_str(),
+                &format!("held back by {constraint}; {} is available", entry.version),
+            );
+        }
+    }
+    if !packages.is_empty() {
+        let moved: Vec<&str> = changes.iter().map(|c| c.name.as_str()).collect();
+        if !moved.is_empty() {
+            ui.info(&format!(
+                "{} now come{} from the {target} snapshot; the project's snapshot stays {current}.",
+                moved.join(", "),
+                if moved.len() == 1 { "s" } else { "" }
+            ));
+        }
+    }
+    if dry_run {
+        ui.info("Dry run: nothing was changed.");
+        ui.result(json!({ "command": "update", "dry_run": true, "snapshot": target, "changes": changes_json(&changes) }));
+        return Ok(());
+    }
+    if !changes.is_empty() {
+        let downgrades = changes
+            .iter()
+            .any(|c| matches!((&c.from, &c.to), (Some(f), Some(t)) if t < f));
+        if !ui.confirm("Apply these changes?", !(moving_back || downgrades))? {
+            bail!("Cancelled. Nothing was changed.");
+        }
+    }
+    let mut lock = lock;
+    let report = sync_library(ui, &env, &project, &new_manifest, &mut lock, &r)?;
+    project.save(&doc.to_string(), &lock, true)?;
+    summary(ui, &report, &lock, start);
+    ui.result(report_json("update", &changes, &report));
+    Ok(())
+}
+
+// ---- undo ----
+
+pub fn undo(ui: &Ui, project_dir: Option<&Path>) -> anyhow::Result<()> {
+    let start = Instant::now();
+    let project = find_project(project_dir)?;
+    let Some((manifest_text, Some(saved_lock))) = project.read_undo()? else {
+        bail!("Nothing to undo.");
+    };
+    let manifest = Manifest::parse(&manifest_text)?;
+    let current = project.read_lock()?;
+    let env = Env::from_env()?;
+    let r = project_r(ui, &env, &manifest, Some(&saved_lock))?;
+    let changes = ops::diff(current.as_ref(), &saved_lock);
+    let mut lock = saved_lock;
+    let report = sync_library(ui, &env, &project, &manifest, &mut lock, &r)?;
+    project.save(&manifest_text, &lock, false)?;
+    project.clear_undo()?;
+    ui.success("Undid the last change to rok.toml and rok.lock.");
+    ui.changes(&changes);
+    summary(ui, &report, &lock, start);
+    ui.result(report_json("undo", &changes, &report));
+    Ok(())
+}
+
+// ---- status ----
+
+/// Prints the project's status. Returns whether there is a problem to fix (an error or a
+/// warning), for `--check`.
+pub fn status(ui: &Ui, project_dir: Option<&Path>, packages: bool) -> anyhow::Result<bool> {
+    use rok_core::status::{self, Level};
+
+    let project = find_project(project_dir)?;
+    let (_, manifest) = project.read_manifest()?;
+    let lock = project.read_lock()?;
+    let env = Env::from_env()?;
+    let installs = env.r_installations();
+    let (minor, pinned) = ops::manifest_r(&manifest);
+    let r = ops::select_r(&installs, &minor, pinned.or(lock.as_ref().map(|l| &l.r)));
+    let library = project.library(&minor, &env.platform);
+    let entries = status::read_library(&library, env.cache.root());
+    let problems = status::check(&status::Inputs {
+        manifest: &manifest,
+        lock: lock.as_ref(),
+        r,
+        library: &entries,
+    });
+    let failing = problems.iter().any(|p| p.level != Level::Info);
+
+    let r_label = r.map_or_else(
+        || format!("R {minor} not installed"),
+        |r| format!("R {}", r.version),
+    );
+    let n = lock.as_ref().map_or(0, |l| l.packages.len());
+    let head = format!(
+        "rok: {} ({r_label}, {n} package{}, snapshot {})",
+        manifest.project.name,
+        plural(n),
+        manifest.project.snapshot
+    );
+    if failing {
+        ui.line_plain(&head);
+    } else {
+        ui.success(&head);
+    }
+    for p in &problems {
+        ui.level(p.level, &p.message);
+        let limit = if packages { usize::MAX } else { 10 };
+        for d in p.details.iter().take(limit) {
+            ui.bullet(d);
+        }
+        if p.details.len() > limit {
+            ui.bullet(&format!(
+                "… and {} more (see `rok status --packages`)",
+                p.details.len() - limit
+            ));
+        }
+        if let Some(fix) = &p.fix {
+            ui.step(&format!("→ {fix}"));
+        }
+    }
+    if packages && let Some(l) = &lock {
+        ui.line_plain("Packages:");
+        for p in &l.packages {
+            let rok_core::lockfile::Source::Repository {
+                repository,
+                snapshot,
+            } = &p.source;
+            let declared = match manifest.dependency(&p.name).map(|d| &d.source) {
+                Some(manifest::DependencySource::Cran { constraint }) if !constraint.is_any() => {
+                    format!(", declared {constraint}")
+                }
+                Some(_) => ", declared".to_string(),
+                None => String::new(),
+            };
+            let date = snapshot.as_deref().unwrap_or("-");
+            ui.bullet(&format!(
+                "{} {} ({repository} {date}{declared})",
+                p.name, p.version
+            ));
+        }
+    }
+    ui.result(json!({
+        "command": "status",
+        "project": manifest.project.name,
+        "r": r.map(|r| r.version.to_string()),
+        "snapshot": manifest.project.snapshot,
+        "ok": !failing,
+        "problems": problems.iter().map(|p| json!({
+            "level": p.level.as_str(),
+            "code": p.code,
+            "message": p.message,
+            "details": p.details,
+            "fix": p.fix,
+        })).collect::<Vec<_>>(),
+        "packages": lock.iter().flat_map(|l| l.packages.iter()).map(|p| {
+            let rok_core::lockfile::Source::Repository { repository, snapshot } = &p.source;
+            json!({
+                "name": p.name,
+                "version": p.version.to_string(),
+                "repository": repository,
+                "snapshot": snapshot,
+                "declared": manifest.dependency(&p.name).is_some(),
+                "installed": entries.get(&p.name).and_then(|i| i.version()).map(|v| v.to_string()),
+            })
+        }).collect::<Vec<_>>(),
+    }));
+    Ok(failing)
+}
+
+// ---- why and tree ----
+
+fn lock_or_fail(project: &Project) -> anyhow::Result<Lockfile> {
+    project
+        .read_lock()?
+        .ok_or_else(|| anyhow::anyhow!("rok.lock is missing; run `rok sync` first."))
+}
+
+pub fn why(ui: &Ui, project_dir: Option<&Path>, package: &str) -> anyhow::Result<()> {
+    let project = find_project(project_dir)?;
+    let (_, manifest) = project.read_manifest()?;
+    let lock = lock_or_fail(&project)?;
+    let declared: Vec<String> = manifest
+        .dependencies
+        .iter()
+        .map(|(n, _)| n.clone())
+        .collect();
+    let Some(lines) = rok_core::graph::why(&lock, &declared, package) else {
+        bail!("{package} is not in rok.lock.");
+    };
+    print_lines(ui, "why", &lines);
+    Ok(())
+}
+
+pub fn tree(
+    ui: &Ui,
+    project_dir: Option<&Path>,
+    package: Option<String>,
+    depth: Option<usize>,
+) -> anyhow::Result<()> {
+    let project = find_project(project_dir)?;
+    let (_, manifest) = project.read_manifest()?;
+    let lock = lock_or_fail(&project)?;
+    let roots: Vec<String> = match package {
+        Some(p) if lock.package(&p).is_none() => bail!("{p} is not in rok.lock."),
+        Some(p) => vec![p],
+        None => manifest
+            .dependencies
+            .iter()
+            .map(|(n, _)| n.clone())
+            .collect(),
+    };
+    print_lines(ui, "tree", &rok_core::graph::tree(&lock, &roots, depth));
+    Ok(())
+}
+
+/// Prints a drawing on stdout, or, with `--json`, its lines as JSON.
+fn print_lines(ui: &Ui, command: &str, lines: &[String]) {
+    if ui.json {
+        ui.result(json!({ "command": command, "lines": lines }));
+    } else {
+        for l in lines {
+            println!("{l}");
+        }
+    }
+}

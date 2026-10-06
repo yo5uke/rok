@@ -156,6 +156,36 @@ impl Project {
         write_atomic(&l, lock.to_toml_string().as_bytes()).map_err(io_err(&l))
     }
 
+    /// The manifest text and lockfile saved before the last change, if any.
+    pub fn read_undo(&self) -> Result<Option<(String, Option<Lockfile>)>, ProjectError> {
+        let dir = self.undo_dir();
+        let manifest = dir.join(manifest::FILE_NAME);
+        let text = match std::fs::read_to_string(&manifest) {
+            Ok(t) => t,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(io_err(&manifest)(e)),
+        };
+        let lock = dir.join(lockfile::FILE_NAME);
+        let lock = match std::fs::read_to_string(&lock) {
+            Ok(t) => Some(Lockfile::parse(&t)?),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => return Err(io_err(&lock)(e)),
+        };
+        Ok(Some((text, lock)))
+    }
+
+    /// Forgets the saved state (after it was restored).
+    pub fn clear_undo(&self) -> Result<(), ProjectError> {
+        for name in [manifest::FILE_NAME, lockfile::FILE_NAME] {
+            let p = self.undo_dir().join(name);
+            match std::fs::remove_file(&p) {
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(io_err(&p)(e)),
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
     /// Writes the lockfile only.
     pub fn save_lock(&self, lock: &Lockfile) -> Result<(), ProjectError> {
         let l = self.lock_path();
