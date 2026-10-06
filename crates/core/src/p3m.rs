@@ -275,8 +275,10 @@ pub struct IndexEntry {
     pub version: Version,
     /// The R versions the package supports, from `Depends: R (...)`.
     pub r_constraint: Constraint,
-    /// `Depends` (without R), `Imports` and `LinkingTo`, in that order.
+    /// `Depends` (without R) and `Imports`: needed to load the package.
     pub dependencies: Vec<Dependency>,
+    /// `LinkingTo`: needed only to build the package from source.
+    pub linking_to: Vec<Dependency>,
     pub needs_compilation: bool,
     /// `OS_type` (`unix` or `windows`), when the package is limited to one.
     pub os_type: Option<String>,
@@ -354,25 +356,28 @@ fn entry_from_record(rec: &dcf::Record) -> Result<IndexEntry, String> {
         .ok_or("no Version field")?
         .parse::<Version>()
         .map_err(|e| e.to_string())?;
+    let field = |name: &str| -> Result<Vec<Dependency>, String> {
+        rec.get(name)
+            .map(|v| dcf::parse_dependencies(v).map_err(|e| format!("{name}: {e}")))
+            .transpose()
+            .map(Option::unwrap_or_default)
+    };
     let mut r_constraint = Constraint::any();
     let mut dependencies = Vec::new();
-    for field in ["Depends", "Imports", "LinkingTo"] {
-        let Some(value) = rec.get(field) else {
-            continue;
-        };
-        for dep in dcf::parse_dependencies(value).map_err(|e| format!("{field}: {e}"))? {
-            if dep.name == "R" {
-                r_constraint = r_constraint.and(&dep.constraint);
-            } else {
-                dependencies.push(dep);
-            }
+    for dep in field("Depends")?.into_iter().chain(field("Imports")?) {
+        if dep.name == "R" {
+            r_constraint = r_constraint.and(&dep.constraint);
+        } else {
+            dependencies.push(dep);
         }
     }
+    let linking_to = field("LinkingTo")?;
     Ok(IndexEntry {
         name: name.to_string(),
         version,
         r_constraint,
         dependencies,
+        linking_to,
         needs_compilation: rec.get("NeedsCompilation") == Some("yes"),
         os_type: rec.get("OS_type").map(str::to_string),
     })
@@ -475,7 +480,8 @@ Version: one
             .iter()
             .map(|d| d.name.as_str())
             .collect();
-        assert_eq!(deps, ["stats", "Rcpp", "dreamerr", "Rcpp"]);
+        assert_eq!(deps, ["stats", "Rcpp", "dreamerr"]);
+        assert_eq!(fixest.linking_to[0].name, "Rcpp");
         assert!(fixest.needs_compilation);
         // The R-devel copy of a recommended package (with `Path`) is ignored.
         assert_eq!(index.get("boot").unwrap().version.as_str(), "1.3-31");

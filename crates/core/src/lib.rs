@@ -11,5 +11,6 @@ pub mod p3m;
 pub mod paths;
 pub mod platform;
 pub mod rdetect;
+pub mod resolve;
 pub mod rpkgs;
 pub mod version;

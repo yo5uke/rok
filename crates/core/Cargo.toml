@@ -16,6 +16,7 @@ toml_edit.workspace = true
 ureq.workspace = true
 flate2.workspace = true
 serde_json.workspace = true
+pubgrub.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

@@ -99,3 +99,51 @@ fn detects_this_machine() {
         eprintln!("  R {} ({:?}) at {}", r.version, r.kind, r.r_home.display());
     }
 }
+
+#[test]
+#[ignore = "needs the network"]
+fn resolves_the_benchmark_projects() {
+    use rok_core::platform::Os;
+    use rok_core::resolve::{Request, SnapshotSource, SourceError, resolve};
+    use std::collections::HashMap;
+
+    let (_t, dirs) = temp_dirs();
+    let p3m = P3m::new(DEFAULT_URL, Http::new(), &dirs);
+    p3m.index("2026-10-01").unwrap(); // download once, outside the timing
+    for (project, roots) in [
+        ("small", &["fixest", "modelsummary"][..]),
+        ("medium", &["tidyverse"][..]),
+        ("gis", &["sf", "terra", "tmap"][..]),
+    ] {
+        let start = Instant::now();
+        let source = SnapshotSource::new(
+            "2026-10-01",
+            |d: &str| p3m.index(d).map_err(|e| SourceError(e.to_string())),
+            HashMap::new(),
+        );
+        let request = Request {
+            r_version: "4.6.1".parse().unwrap(),
+            os: Os::Linux,
+            requirements: roots
+                .iter()
+                .map(|r| (r.to_string(), Default::default()))
+                .collect(),
+            preferred: HashMap::new(),
+            include_linking_to: true,
+        };
+        let result = resolve(&source, &request).unwrap();
+        let elapsed = start.elapsed();
+        let mut without_linking = request.clone();
+        without_linking.include_linking_to = false;
+        let fewer = resolve(&source, &without_linking).unwrap().len();
+        let recommended = result
+            .iter()
+            .filter(|r| rok_core::rpkgs::is_recommended(&r.name))
+            .count();
+        eprintln!(
+            "{project}: {} packages ({recommended} recommended), {fewer} without LinkingTo; index load + resolve {elapsed:?}",
+            result.len()
+        );
+        assert!(result.iter().any(|r| r.name == roots[0]));
+    }
+}
