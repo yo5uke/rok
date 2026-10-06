@@ -71,13 +71,21 @@ impl Http {
 
     /// GET `url` and return the body. `user_agent` replaces the default User-Agent.
     pub fn get_bytes(&self, url: &str, user_agent: Option<&str>) -> Result<Vec<u8>, HttpError> {
+        match user_agent {
+            Some(ua) => self.get_with(url, &[("User-Agent", ua)]),
+            None => self.get_with(url, &[]),
+        }
+    }
+
+    /// GET `url` with extra headers (such as `Authorization`) and return the body.
+    pub fn get_with(&self, url: &str, headers: &[(&str, &str)]) -> Result<Vec<u8>, HttpError> {
         let transport = |source| HttpError::Transport {
             url: url.to_string(),
             source: Box::new(source),
         };
         let mut req = self.agent.get(url);
-        if let Some(ua) = user_agent {
-            req = req.header("User-Agent", ua);
+        for (k, v) in headers {
+            req = req.header(*k, *v);
         }
         let mut resp = req.call().map_err(transport)?;
         let status = resp.status().as_u16();

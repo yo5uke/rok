@@ -100,3 +100,46 @@ fn init_add_sync_remove() {
         "a second undo has nothing to undo"
     );
 }
+
+#[test]
+#[ignore = "needs the network (GitHub, R-multiverse) and R"]
+fn github_and_repository_packages() {
+    let t = tempfile::tempdir().unwrap();
+    let home = t.path();
+    json(&rok(home, &["init", "proj", "--json"]));
+    let proj = home.join("proj");
+    let read = |f: &str| std::fs::read_to_string(proj.join(f)).unwrap();
+
+    // A GitHub package: declared with its repository, locked at a commit, built from source.
+    let added = json(&rok(
+        &proj,
+        &["add", "gaborcsardi/praise", "--yes", "--json"],
+    ));
+    assert_eq!(added["changes"][0]["name"], "praise");
+    assert!(
+        added["changes"][0]["note"]
+            .as_str()
+            .unwrap()
+            .starts_with("gaborcsardi/praise@")
+    );
+    assert!(read("rok.toml").contains(r#"praise = { github = "gaborcsardi/praise" }"#));
+    assert!(read("rok.lock").contains(r#"source = { github = "gaborcsardi/praise", commit = ""#));
+
+    // A package from a CRAN-like repository: the URL and its Git origin are locked.
+    let mut manifest = read("rok.toml");
+    manifest.push_str(
+        "rcheology = { repo = \"multiverse\" }\n\n[repositories]\nmultiverse = \"https://community.r-multiverse.org\"\n",
+    );
+    std::fs::write(proj.join("rok.toml"), manifest).unwrap();
+    let synced = json(&rok(&proj, &["sync", "--yes", "--json"]));
+    assert_eq!(synced["changes"][0]["name"], "rcheology");
+    assert!(read("rok.lock").contains(
+        r#"repository = "multiverse", url = "https://community.r-multiverse.org", remote-url = ""#
+    ));
+    assert!(rok(&proj, &["sync", "--locked"]).status.success());
+    assert!(rok(&proj, &["status", "--check"]).status.success());
+
+    // GitHub packages can be named by their repository.
+    let removed = json(&rok(&proj, &["remove", "gaborcsardi/praise", "--json"]));
+    assert_eq!(removed["changes"][0]["name"], "praise");
+}

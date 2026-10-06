@@ -74,7 +74,7 @@ pub enum DependencySource {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum GitRef {
     DefaultBranch,
     Branch(String),

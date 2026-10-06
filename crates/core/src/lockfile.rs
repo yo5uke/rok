@@ -10,6 +10,7 @@ use std::collections::BTreeMap;
 use serde::Deserialize;
 
 use crate::constraint::Constraint;
+use crate::manifest::{GitRef, parse_github};
 use crate::version::Version;
 
 /// File name of the lockfile.
@@ -41,6 +42,9 @@ pub struct Snapshot {
 pub struct ManifestCopy {
     pub dependencies: Vec<String>,
     pub constraints: BTreeMap<String, Constraint>,
+    /// Declarations other than plain CRAN, in a canonical form such as
+    /// `github:yo5uke/coresynth` or `repo:multiverse` (see `ops::source_key`).
+    pub sources: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -52,16 +56,65 @@ pub struct LockedPackage {
     pub dependencies: Vec<String>,
     /// SHA-256 of the OS-independent source tarball, when known.
     pub sha256: Option<String>,
+    /// Environment variables set when building from source (they change the result).
+    pub env: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Source {
-    /// A CRAN-like repository: `cran` or an alias from `[repositories]`. `snapshot` is the date
-    /// the package was taken from, when it is a dated snapshot.
+    /// A CRAN-like repository: `cran` (P3M snapshots) or an alias from `[repositories]`, whose
+    /// `url` is recorded so the lockfile alone can reproduce the library. `snapshot` is the P3M
+    /// date the package was taken from. `remote` is the Git origin that r-universe records in
+    /// DESCRIPTION, kept to rebuild a release the repository no longer has.
     Repository {
         repository: String,
+        url: Option<String>,
         snapshot: Option<String>,
+        remote: Option<Remote>,
     },
+    /// A GitHub repository at a commit. `reference` mirrors the manifest (`branch`, `tag`,
+    /// `rev`, or the default branch).
+    GitHub {
+        owner: String,
+        repo: String,
+        reference: GitRef,
+        commit: String,
+    },
+}
+
+/// The Git origin of a package (`RemoteUrl` and `RemoteSha` in its DESCRIPTION).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Remote {
+    pub url: String,
+    pub sha: String,
+}
+
+impl Source {
+    /// The P3M snapshot date, for packages from CRAN.
+    pub fn snapshot(&self) -> Option<&str> {
+        match self {
+            Source::Repository { snapshot, .. } => snapshot.as_deref(),
+            Source::GitHub { .. } => None,
+        }
+    }
+
+    /// A short description for messages: `cran 2026-10-01`, `multiverse`, `github yo5uke/x@abc1234`.
+    pub fn describe(&self) -> String {
+        match self {
+            Source::Repository {
+                repository,
+                snapshot: Some(d),
+                ..
+            } => format!("{repository} {d}"),
+            Source::Repository { repository, .. } => repository.clone(),
+            Source::GitHub {
+                owner,
+                repo,
+                commit,
+                ..
+            } => format!("github {owner}/{repo}@{}", &commit[..commit.len().min(7)]),
+        }
+    }
 }
 
 /// Error returned for an invalid lockfile.
@@ -112,6 +165,8 @@ struct RawManifest {
     dependencies: Vec<String>,
     #[serde(default)]
     constraints: BTreeMap<String, String>,
+    #[serde(default)]
+    sources: BTreeMap<String, String>,
 }
 
 #[derive(Deserialize)]
@@ -123,13 +178,95 @@ struct RawPackage {
     #[serde(default)]
     dependencies: Vec<String>,
     sha256: Option<String>,
+    #[serde(default)]
+    env: BTreeMap<String, String>,
 }
 
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
 struct RawSource {
-    repository: String,
+    repository: Option<String>,
+    url: Option<String>,
     snapshot: Option<String>,
+    remote_url: Option<String>,
+    remote_sha: Option<String>,
+    github: Option<String>,
+    branch: Option<String>,
+    tag: Option<String>,
+    rev: Option<String>,
+    commit: Option<String>,
+}
+
+fn is_hex(s: &str, len: usize) -> bool {
+    s.len() == len && s.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+impl RawSource {
+    fn into_source(self, package: &str) -> Result<Source, LockfileError> {
+        let invalid = |m: &str| LockfileError::Invalid(format!("package `{package}`: {m}"));
+        if let Some(date) = &self.snapshot
+            && !crate::date::is_valid(date)
+        {
+            return Err(invalid(&format!("invalid snapshot date `{date}`")));
+        }
+        match (self.repository, self.github) {
+            (Some(repository), None) => {
+                if self.branch.is_some()
+                    || self.tag.is_some()
+                    || self.rev.is_some()
+                    || self.commit.is_some()
+                {
+                    return Err(invalid(
+                        "`branch`, `tag`, `rev` and `commit` belong to GitHub sources",
+                    ));
+                }
+                let remote = match (self.remote_url, self.remote_sha) {
+                    (Some(url), Some(sha)) => Some(Remote { url, sha }),
+                    (None, None) => None,
+                    _ => return Err(invalid("`remote-url` and `remote-sha` go together")),
+                };
+                Ok(Source::Repository {
+                    repository,
+                    url: self.url,
+                    snapshot: self.snapshot,
+                    remote,
+                })
+            }
+            (None, Some(github)) => {
+                let (owner, repo) = parse_github(&github)
+                    .ok_or_else(|| invalid(&format!("invalid GitHub repository `{github}`")))?;
+                let commit = self
+                    .commit
+                    .ok_or_else(|| invalid("a GitHub source needs `commit`"))?;
+                if !is_hex(&commit, 40) {
+                    return Err(invalid(&format!("invalid commit `{commit}`")));
+                }
+                let reference = match (self.branch, self.tag, self.rev) {
+                    (None, None, None) => GitRef::DefaultBranch,
+                    (Some(b), None, None) => GitRef::Branch(b),
+                    (None, Some(t), None) => GitRef::Tag(t),
+                    (None, None, Some(r)) => GitRef::Rev(r),
+                    _ => return Err(invalid("use only one of `branch`, `tag` and `rev`")),
+                };
+                if self.url.is_some()
+                    || self.snapshot.is_some()
+                    || self.remote_url.is_some()
+                    || self.remote_sha.is_some()
+                {
+                    return Err(invalid(
+                        "`url`, `snapshot` and `remote-*` belong to repository sources",
+                    ));
+                }
+                Ok(Source::GitHub {
+                    owner,
+                    repo,
+                    reference,
+                    commit,
+                })
+            }
+            _ => Err(invalid("a source needs either `repository` or `github`")),
+        }
+    }
 }
 
 impl Lockfile {
@@ -181,31 +318,22 @@ impl Lockfile {
                     p.name, p.version
                 ))
             })?;
-            if let Some(date) = &p.source.snapshot
-                && !crate::date::is_valid(date)
-            {
-                return Err(invalid(format!(
-                    "package `{}`: invalid snapshot date `{date}`",
-                    p.name
-                )));
-            }
             if let Some(h) = &p.sha256
-                && !(h.len() == 64 && h.bytes().all(|b| b.is_ascii_hexdigit()))
+                && !is_hex(h, 64)
             {
                 return Err(invalid(format!(
                     "package `{}`: invalid sha256 `{h}`",
                     p.name
                 )));
             }
+            let source = p.source.into_source(&p.name)?;
             packages.push(LockedPackage {
                 name: p.name,
                 version,
-                source: Source::Repository {
-                    repository: p.source.repository,
-                    snapshot: p.source.snapshot,
-                },
+                source,
                 dependencies: p.dependencies,
                 sha256: p.sha256,
+                env: p.env,
             });
         }
         let mut seen = std::collections::HashSet::new();
@@ -226,6 +354,7 @@ impl Lockfile {
             manifest: ManifestCopy {
                 dependencies: raw.manifest.dependencies,
                 constraints,
+                sources: raw.manifest.sources,
             },
             packages,
         })
@@ -268,6 +397,15 @@ impl Lockfile {
             constraints.insert(name, self.manifest.constraints[name].to_string().into());
         }
         manifest["constraints"] = value(constraints);
+        if !self.manifest.sources.is_empty() {
+            let mut sources = InlineTable::new();
+            let mut names: Vec<&String> = self.manifest.sources.keys().collect();
+            names.sort_by(|a, b| name_order(a, b));
+            for name in names {
+                sources.insert(name, self.manifest.sources[name].as_str().into());
+            }
+            manifest["sources"] = value(sources);
+        }
         doc["manifest"] = Item::Table(manifest);
 
         let mut packages: Vec<&LockedPackage> = self.packages.iter().collect();
@@ -281,18 +419,55 @@ impl Lockfile {
             match &p.source {
                 Source::Repository {
                     repository,
+                    url,
                     snapshot,
+                    remote,
                 } => {
                     source.insert("repository", repository.as_str().into());
+                    if let Some(url) = url {
+                        source.insert("url", url.as_str().into());
+                    }
                     if let Some(date) = snapshot {
                         source.insert("snapshot", date.as_str().into());
                     }
+                    if let Some(r) = remote {
+                        source.insert("remote-url", r.url.as_str().into());
+                        source.insert("remote-sha", r.sha.as_str().into());
+                    }
+                }
+                Source::GitHub {
+                    owner,
+                    repo,
+                    reference,
+                    commit,
+                } => {
+                    source.insert("github", format!("{owner}/{repo}").into());
+                    match reference {
+                        GitRef::DefaultBranch => {}
+                        GitRef::Branch(b) => {
+                            source.insert("branch", b.as_str().into());
+                        }
+                        GitRef::Tag(t) => {
+                            source.insert("tag", t.as_str().into());
+                        }
+                        GitRef::Rev(r) => {
+                            source.insert("rev", r.as_str().into());
+                        }
+                    }
+                    source.insert("commit", commit.as_str().into());
                 }
             }
             t["source"] = value(source);
             t["dependencies"] = value(sorted_array(&p.dependencies));
             if let Some(h) = &p.sha256 {
                 t["sha256"] = value(h.as_str());
+            }
+            if !p.env.is_empty() {
+                let mut env = InlineTable::new();
+                for (k, v) in &p.env {
+                    env.insert(k, v.as_str().into());
+                }
+                t["env"] = value(env);
             }
             array.push(t);
         }
@@ -348,6 +523,65 @@ sha256 = "f2846f45fbbdfe886f05fa7489314a56ae0f3352ae5bc1070b0cdd4f44ffa1f5"
         assert_eq!(lock.package("fixest").unwrap().version.as_str(), "0.12.1");
         assert_eq!(lock.package("data.table").unwrap().sha256, None);
         assert_eq!(lock.to_toml_string(), EXAMPLE);
+    }
+
+    const SOURCES: &str = r#"version = 1
+generated-by = "rok 0.1.0"
+
+[r]
+version = "4.6.1"
+
+[snapshot]
+date = "2026-10-01"
+repository = "https://packagemanager.posit.co/cran"
+
+[manifest]
+dependencies = ["coresynth", "polars"]
+constraints = {}
+sources = { coresynth = "github:yo5uke/coresynth", polars = "repo:multiverse" }
+
+[[package]]
+name = "coresynth"
+version = "0.3.0"
+source = { github = "yo5uke/coresynth", tag = "v0.3.0", commit = "0123456789abcdef0123456789abcdef01234567" }
+dependencies = []
+
+[[package]]
+name = "polars"
+version = "1.16.0"
+source = { repository = "multiverse", url = "https://community.r-multiverse.org", remote-url = "https://github.com/pola-rs/r-polars", remote-sha = "abc" }
+dependencies = []
+sha256 = "f263f133f75fc9501c356e24cf2a0fac1dfa0d6d01a121ef3eaa79d9886bbd22"
+env = { NOT_CRAN = "true" }
+"#;
+
+    #[test]
+    fn round_trips_github_and_repository_sources() {
+        let lock = Lockfile::parse(SOURCES).unwrap();
+        assert!(
+            matches!(&lock.package("coresynth").unwrap().source, Source::GitHub { reference: GitRef::Tag(t), .. } if t == "v0.3.0")
+        );
+        assert_eq!(lock.package("polars").unwrap().env["NOT_CRAN"], "true");
+        assert_eq!(
+            lock.package("coresynth").unwrap().source.describe(),
+            "github yo5uke/coresynth@0123456"
+        );
+        assert_eq!(lock.to_toml_string(), SOURCES);
+        let bad = SOURCES.replace(
+            "commit = \"0123456789abcdef0123456789abcdef01234567\"",
+            "commit = \"main\"",
+        );
+        assert!(
+            Lockfile::parse(&bad)
+                .unwrap_err()
+                .to_string()
+                .contains("invalid commit")
+        );
+        let both = SOURCES.replace(
+            "{ github = \"yo5uke/coresynth\",",
+            "{ repository = \"cran\", github = \"yo5uke/coresynth\",",
+        );
+        assert!(Lockfile::parse(&both).is_err());
     }
 
     #[test]

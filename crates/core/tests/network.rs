@@ -130,6 +130,7 @@ fn resolves_the_benchmark_projects() {
                 .collect(),
             preferred: HashMap::new(),
             include_linking_to: true,
+            prefer_date: None,
         };
         let result = resolve(&source, &request).unwrap();
         let elapsed = start.elapsed();

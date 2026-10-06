@@ -84,6 +84,11 @@ impl Ui {
     /// major version is marked, since it may break code.
     pub fn changes(&self, changes: &[Change]) {
         for c in changes {
+            let note = c
+                .note
+                .as_ref()
+                .map(|n| format!(" ({n})"))
+                .unwrap_or_default();
             let s = match (&c.from, &c.to) {
                 (None, Some(to)) => format!("{} {} {to}", self.paint(GREEN, "+"), c.name),
                 (Some(from), None) => format!("{} {} {from}", self.paint(RED, "-"), c.name),
@@ -96,12 +101,15 @@ impl Ui {
                     };
                     format!("{} {} {from} → {to}{mark}", self.paint(BLUE, "↑"), c.name)
                 }
+                (Some(from), Some(to)) if to == from => {
+                    format!("{} {} {to}", self.paint(BLUE, "~"), c.name)
+                }
                 (Some(from), Some(to)) => {
                     format!("{} {} {from} → {to}", self.paint(YELLOW, "↓"), c.name)
                 }
                 (None, None) => continue,
             };
-            self.line(&format!("  {s}"));
+            self.line(&format!("  {s}{note}"));
         }
     }
 
@@ -166,6 +174,7 @@ pub fn changes_json(changes: &[Change]) -> serde_json::Value {
                 "name": c.name,
                 "from": c.from.as_ref().map(|v| v.to_string()),
                 "to": c.to.as_ref().map(|v| v.to_string()),
+                "note": c.note,
             })
         })
         .collect()

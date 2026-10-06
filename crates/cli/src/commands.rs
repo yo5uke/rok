@@ -6,12 +6,15 @@ use std::time::Instant;
 
 use anyhow::{Context as _, bail};
 use rok_core::dcf::is_package_name;
+use rok_core::github;
 use rok_core::install;
-use rok_core::lockfile::{Lockfile, ManifestCopy, Snapshot};
-use rok_core::manifest::{self, DependencySpec, Manifest};
+use rok_core::lockfile::{Lockfile, ManifestCopy, Snapshot, Source};
+use rok_core::manifest::{self, DependencySource, DependencySpec, GitRef, Manifest};
 use rok_core::ops::{self, Env, plural};
+use rok_core::p3m::Index;
 use rok_core::project::Project;
 use rok_core::rdetect::RInstallation;
+use rok_core::resolve::Origin;
 use rok_core::rpkgs::is_base;
 use rok_core::version::Version;
 use serde_json::json;
@@ -80,14 +83,20 @@ fn sync_library(
     let sources = plan.sources();
     if !sources.is_empty() {
         ui.warn(&format!(
-            "{} package{} must be built from source (no binary for R {} on {}):",
+            "{} package{} must be built from source:",
             sources.len(),
             plural(sources.len()),
-            r.version.minor(),
-            env.platform
         ));
+        let minor = r.version.minor();
         for w in &sources {
-            ui.bullet(&format!("{} {}", w.name, w.version));
+            let why = match &w.origin {
+                Origin::Snapshot(_) => format!("no binary for R {minor} on {}", env.platform),
+                Origin::Repository { alias, .. } => {
+                    format!("`{alias}` has no binary for R {minor} on {}", env.platform)
+                }
+                Origin::GitHub { owner, repo, .. } => format!("from GitHub {owner}/{repo}"),
+            };
+            ui.bullet(&format!("{} {} ({why})", w.name, w.version));
         }
         let missing = install::missing_build_tools(r);
         if !missing.is_empty() {
@@ -111,6 +120,7 @@ fn sync_library(
     let library = project.library(&r.version.minor(), &env.platform);
     let report = ops::execute_sync(env, &plan, &library, r, &|m| ui.step(m))?;
     ops::record_built_checksums(lock, &report.built);
+    ops::record_remotes(lock, &report.paths);
     Ok(report)
 }
 
@@ -274,6 +284,7 @@ pub fn add(
     project_dir: Option<&Path>,
     packages: &[String],
     version: Option<String>,
+    latest: bool,
 ) -> anyhow::Result<()> {
     let start = Instant::now();
     if version.is_some() && packages.len() != 1 {
@@ -283,9 +294,27 @@ pub fn add(
         Some(v) => v.parse()?,
         None => Default::default(),
     };
+    let mut cran = Vec::new();
+    let mut from_github = Vec::new();
     for p in packages {
         if p.contains('/') {
-            bail!("{p}: GitHub packages are not supported yet.");
+            let Some(spec) = github::parse_spec(p) else {
+                bail!(
+                    "`{p}` is not a GitHub repository; use the form owner/repo or owner/repo@ref."
+                );
+            };
+            if version.is_some() {
+                bail!(
+                    "`--version` applies to CRAN packages; a GitHub package is fixed by its commit."
+                );
+            }
+            if latest {
+                bail!(
+                    "`--latest` applies to CRAN packages; a GitHub package is fixed by its commit."
+                );
+            }
+            from_github.push(spec);
+            continue;
         }
         if !is_package_name(p) {
             bail!("`{p}` is not a valid R package name.");
@@ -293,6 +322,7 @@ pub fn add(
         if is_base(p) {
             bail!("{p} is part of R itself and does not need to be added.");
         }
+        cran.push(p.clone());
     }
 
     let project = find_project(project_dir)?;
@@ -300,15 +330,36 @@ pub fn add(
     let old_lock = project.read_lock()?;
     let env = Env::from_env()?;
     let date = &manifest.project.snapshot;
-    let index = env.p3m.index(date)?;
-    for p in packages {
+
+    // `--latest`: the packages come from the latest snapshot; the project's snapshot stays.
+    let mut keep = ops::Keep::default();
+    if latest {
+        let (newest, dates) = env.p3m.resolve_snapshot(None)?;
+        if dates.stale {
+            ui.warn("Could not reach P3M; using the snapshot dates cached earlier.");
+        }
+        if newest == *date {
+            ui.info(&format!(
+                "The project's snapshot ({date}) is already the latest one."
+            ));
+        } else {
+            keep.latest = cran.iter().cloned().collect();
+            keep.newer = Some(newest);
+        }
+    }
+    let lookup = keep.newer.as_ref().unwrap_or(date);
+    let index = env.p3m.index(lookup)?;
+    for p in &cran {
         if index.get(p).is_none() {
             let similar = index
                 .iter()
                 .find(|e| e.name.eq_ignore_ascii_case(p))
                 .map(|e| e.name.clone());
             match similar {
-                Some(s) => bail!("{p} is not in the {date} snapshot. Did you mean `{s}`?"),
+                Some(s) => bail!("{p} is not in the {lookup} snapshot. Did you mean `{s}`?"),
+                None if latest => {
+                    bail!("{p} is not in the latest snapshot ({lookup}).")
+                }
                 None => bail!(
                     "{p} is not in the {date} snapshot.\nIf it was released after {date}, move the project's snapshot forward with `rok update`, or add only this package from the latest snapshot with `rok add --latest`."
                 ),
@@ -316,21 +367,100 @@ pub fn add(
         }
     }
 
-    for p in packages {
-        doc.set_dependency(p, &DependencySpec::cran(constraint.clone()));
+    // Build-time environment variables stay when a declaration is replaced.
+    let env_of = |name: &str| {
+        manifest
+            .dependency(name)
+            .map(|d| d.env.clone())
+            .unwrap_or_default()
+    };
+    for p in &cran {
+        let spec = DependencySpec {
+            source: DependencySource::Cran {
+                constraint: constraint.clone(),
+            },
+            env: env_of(p),
+        };
+        doc.set_dependency(p, &spec);
+    }
+    let gh = env.github();
+    for (owner, repo, reference) in from_github {
+        ui.step(&format!("Looking up {owner}/{repo} on GitHub"));
+        let reference = match reference {
+            None => GitRef::DefaultBranch,
+            Some(r) => gh.classify(&owner, &repo, &r)?,
+        };
+        let (entry, _) = ops::read_github(&gh, &owner, &repo, &reference)?;
+        let name = entry.name;
+        if is_base(&name) {
+            bail!("{owner}/{repo} is {name}, which is part of R itself.");
+        }
+        // `track = true` stays when the same repository's branch is added again.
+        let track = matches!(
+            manifest.dependency(&name).map(|d| &d.source),
+            Some(DependencySource::GitHub { owner: o, repo: r, reference: re, track: true })
+                if *o == owner && *r == repo && *re == reference
+        );
+        let spec = DependencySpec {
+            source: DependencySource::GitHub {
+                owner,
+                repo,
+                reference,
+                track,
+            },
+            env: env_of(&name),
+        };
+        doc.set_dependency(&name, &spec);
     }
     let new_text = doc.to_string();
     let new_manifest = Manifest::parse(&new_text)?;
-    apply(
+    let lock = apply(
         ui,
         &env,
         &project,
         &new_manifest,
         &new_text,
         old_lock,
+        &keep,
         "add",
         start,
-    )
+    )?;
+    let mixed: Vec<String> = cran
+        .iter()
+        .filter_map(|n| lock.package(n))
+        .filter_map(|p| {
+            p.source
+                .snapshot()
+                .filter(|d| d != date)
+                .map(|d| format!("{} ({d})", p.name))
+        })
+        .collect();
+    if latest && !mixed.is_empty() {
+        ui.info(&format!(
+            "From the latest snapshot: {}; the project's snapshot stays {date}.",
+            mixed.join(", ")
+        ));
+    }
+    Ok(())
+}
+
+/// The declared package a command-line name refers to: `owner/repo` names a GitHub package.
+fn declared_name(manifest: &Manifest, arg: &str) -> anyhow::Result<String> {
+    if !arg.contains('/') {
+        return Ok(arg.to_string());
+    }
+    let Some((owner, repo, None)) = github::parse_spec(arg) else {
+        bail!("`{arg}` is not a package name or a GitHub repository (owner/repo).");
+    };
+    manifest
+        .dependencies
+        .iter()
+        .find(|(_, spec)| {
+            matches!(&spec.source, DependencySource::GitHub { owner: o, repo: r, .. }
+                if o.eq_ignore_ascii_case(&owner) && r.eq_ignore_ascii_case(&repo))
+        })
+        .map(|(name, _)| name.clone())
+        .ok_or_else(|| anyhow::anyhow!("No package from {owner}/{repo} is declared in rok.toml."))
 }
 
 // ---- remove ----
@@ -340,7 +470,11 @@ pub fn remove(ui: &Ui, project_dir: Option<&Path>, packages: &[String]) -> anyho
     let project = find_project(project_dir)?;
     let (mut doc, manifest) = project.read_manifest()?;
     let old_lock = project.read_lock()?;
-    for p in packages {
+    let packages = packages
+        .iter()
+        .map(|p| declared_name(&manifest, p))
+        .collect::<anyhow::Result<Vec<String>>>()?;
+    for p in &packages {
         if manifest.dependency(p).is_some() {
             continue;
         }
@@ -359,7 +493,7 @@ pub fn remove(ui: &Ui, project_dir: Option<&Path>, packages: &[String]) -> anyho
             if users.len() == 1 { "s" } else { "" }
         );
     }
-    for p in packages {
+    for p in &packages {
         doc.remove_dependency(p);
     }
     let new_text = doc.to_string();
@@ -372,9 +506,11 @@ pub fn remove(ui: &Ui, project_dir: Option<&Path>, packages: &[String]) -> anyho
         &new_manifest,
         &new_text,
         old_lock,
+        &ops::Keep::default(),
         "remove",
         start,
     )
+    .map(|_| ())
 }
 
 /// Resolves the new manifest, syncs the library, and only then writes rok.toml and rok.lock
@@ -387,9 +523,10 @@ fn apply(
     manifest: &Manifest,
     manifest_text: &str,
     old_lock: Option<Lockfile>,
+    keep: &ops::Keep,
     command: &str,
     start: Instant,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Lockfile> {
     let r = project_r(ui, env, manifest, old_lock.as_ref())?;
     let lock_r = old_lock
         .as_ref()
@@ -397,7 +534,7 @@ fn apply(
         .map_or(&r.version, |l| &l.r)
         .clone();
     ui.step("Resolving dependencies");
-    let mut lock = ops::resolve_lock(env, manifest, old_lock.as_ref(), &lock_r)?;
+    let mut lock = ops::resolve_lock_with(env, manifest, old_lock.as_ref(), &lock_r, keep)?;
     let changes = ops::diff(old_lock.as_ref(), &lock);
     let report = sync_library(ui, env, project, manifest, &mut lock, &r)?;
     project.save(manifest_text, &lock, true)?;
@@ -408,7 +545,7 @@ fn apply(
     }
     summary(ui, &report, &lock, start);
     ui.result(report_json(command, &changes, &report));
-    Ok(())
+    Ok(lock)
 }
 
 // ---- sync ----
@@ -472,6 +609,10 @@ pub fn update(
     let old_lock = project
         .read_lock()?
         .ok_or_else(|| anyhow::anyhow!("rok.lock is missing; run `rok sync` first."))?;
+    let packages = packages
+        .iter()
+        .map(|p| declared_name(&manifest, p))
+        .collect::<anyhow::Result<Vec<String>>>()?;
     let env = Env::from_env()?;
     let r = project_r(ui, &env, &manifest, Some(&old_lock))?;
     let lock_r = if old_lock.r.minor() == r.version.minor() {
@@ -511,7 +652,7 @@ pub fn update(
         let lock = ops::resolve_lock_with(&env, &m, Some(&old_lock), &lock_r, &keep)?;
         (m, lock)
     } else {
-        for p in packages {
+        for p in &packages {
             if old_lock.package(p).is_none() {
                 bail!("{p} is not in rok.lock.");
             }
@@ -547,8 +688,16 @@ pub fn update(
             );
         }
     }
+    github_notices(ui, &env, &new_manifest, &lock, &newest, packages.is_empty());
     if !packages.is_empty() {
-        let moved: Vec<&str> = changes.iter().map(|c| c.name.as_str()).collect();
+        let moved: Vec<&str> = changes
+            .iter()
+            .filter(|c| {
+                lock.package(&c.name)
+                    .is_some_and(|p| p.source.snapshot().is_some())
+            })
+            .map(|c| c.name.as_str())
+            .collect();
         if !moved.is_empty() {
             ui.info(&format!(
                 "{} now come{} from the {target} snapshot; the project's snapshot stays {current}.",
@@ -576,6 +725,63 @@ pub fn update(
     summary(ui, &report, &lock, start);
     ui.result(report_json("update", &changes, &report));
     Ok(())
+}
+
+/// After an update: GitHub packages whose version is now on CRAN, and (when the whole project
+/// was updated) kept GitHub packages whose branch has new commits.
+fn github_notices(
+    ui: &Ui,
+    env: &Env,
+    manifest: &Manifest,
+    lock: &Lockfile,
+    cran: &Index,
+    whole: bool,
+) {
+    let gh = env.github();
+    for p in &lock.packages {
+        let Source::GitHub {
+            owner,
+            repo,
+            reference,
+            commit,
+        } = &p.source
+        else {
+            continue;
+        };
+        if let Some(e) = cran.get(&p.name)
+            && e.version >= p.version
+        {
+            ui.info(&format!(
+                "{} {} is on CRAN; to switch from GitHub, run `rok add {}`.",
+                p.name, e.version, p.name
+            ));
+        }
+        let tracked = matches!(
+            manifest.dependency(&p.name).map(|d| &d.source),
+            Some(DependencySource::GitHub { track: true, .. })
+        );
+        let follows_branch = matches!(reference, GitRef::DefaultBranch | GitRef::Branch(_));
+        if !whole || tracked || !follows_branch {
+            continue;
+        }
+        match gh.resolve(owner, repo, reference) {
+            Ok(head) if head != *commit => {
+                let count = gh
+                    .ahead_by(owner, repo, commit, &head)
+                    .map(|n| format!("{n} new commit{}", plural(n as usize)))
+                    .unwrap_or_else(|| "new commits".to_string());
+                ui.info(&format!(
+                    "{owner}/{repo} has {count} since {}; update {} with `rok update {owner}/{repo}`.",
+                    &commit[..7],
+                    p.name
+                ));
+            }
+            Ok(_) => {}
+            Err(e) => ui.warn(&format!(
+                "Could not check {owner}/{repo} for new commits: {e}"
+            )),
+        }
+    }
 }
 
 // ---- undo ----
@@ -661,21 +867,19 @@ pub fn status(ui: &Ui, project_dir: Option<&Path>, packages: bool) -> anyhow::Re
     if packages && let Some(l) = &lock {
         ui.line_plain("Packages:");
         for p in &l.packages {
-            let rok_core::lockfile::Source::Repository {
-                repository,
-                snapshot,
-            } = &p.source;
             let declared = match manifest.dependency(&p.name).map(|d| &d.source) {
-                Some(manifest::DependencySource::Cran { constraint }) if !constraint.is_any() => {
-                    format!(", declared {constraint}")
-                }
+                Some(
+                    DependencySource::Cran { constraint }
+                    | DependencySource::Repository { constraint, .. },
+                ) if !constraint.is_any() => format!(", declared {constraint}"),
                 Some(_) => ", declared".to_string(),
                 None => String::new(),
             };
-            let date = snapshot.as_deref().unwrap_or("-");
             ui.bullet(&format!(
-                "{} {} ({repository} {date}{declared})",
-                p.name, p.version
+                "{} {} ({}{declared})",
+                p.name,
+                p.version,
+                p.source.describe()
             ));
         }
     }
@@ -693,12 +897,11 @@ pub fn status(ui: &Ui, project_dir: Option<&Path>, packages: bool) -> anyhow::Re
             "fix": p.fix,
         })).collect::<Vec<_>>(),
         "packages": lock.iter().flat_map(|l| l.packages.iter()).map(|p| {
-            let rok_core::lockfile::Source::Repository { repository, snapshot } = &p.source;
             json!({
                 "name": p.name,
                 "version": p.version.to_string(),
-                "repository": repository,
-                "snapshot": snapshot,
+                "source": ops::origin_label(&p.source),
+                "snapshot": p.source.snapshot(),
                 "declared": manifest.dependency(&p.name).is_some(),
                 "installed": entries.get(&p.name).and_then(|i| i.version()).map(|v| v.to_string()),
             })

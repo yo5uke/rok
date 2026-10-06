@@ -23,6 +23,7 @@ use pubgrub::{
 use crate::constraint::{Constraint, Op};
 use crate::dcf::Dependency;
 use crate::lockfile::name_order;
+use crate::manifest::GitRef;
 use crate::p3m::{Index, IndexEntry};
 use crate::platform::Os;
 use crate::rpkgs::is_base;
@@ -46,33 +47,72 @@ impl fmt::Display for Node {
     }
 }
 
-/// One available version of a package.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Candidate {
-    pub version: Version,
-    /// The snapshot date this version is taken from.
-    pub date: String,
-    pub r_constraint: Constraint,
-    pub dependencies: Vec<Dependency>,
-    pub linking_to: Vec<Dependency>,
-    pub os_type: Option<String>,
+/// Where a version comes from.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum Origin {
+    /// A P3M CRAN snapshot date.
+    Snapshot(String),
+    /// A CRAN-like repository declared in `[repositories]`.
+    Repository { alias: String, url: String },
+    /// A GitHub commit.
+    GitHub {
+        owner: String,
+        repo: String,
+        reference: GitRef,
+        commit: String,
+    },
 }
 
-impl Candidate {
-    pub fn from_index(entry: &IndexEntry, date: &str) -> Candidate {
-        Candidate {
-            version: entry.version.clone(),
-            date: date.to_string(),
-            r_constraint: entry.r_constraint.clone(),
-            dependencies: entry.dependencies.clone(),
-            linking_to: entry.linking_to.clone(),
-            os_type: entry.os_type.clone(),
+impl fmt::Display for Origin {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Origin::Snapshot(date) => f.write_str(date),
+            Origin::Repository { alias, .. } => f.write_str(alias),
+            Origin::GitHub {
+                owner,
+                repo,
+                commit,
+                ..
+            } => write!(f, "{owner}/{repo}@{}", &commit[..commit.len().min(7)]),
         }
     }
 }
 
-/// Versions of a package with the snapshot dates they come from.
-type Versions = Rc<Vec<(Version, String)>>;
+/// One available version of a package.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Candidate {
+    pub version: Version,
+    pub origin: Origin,
+    pub r_constraint: Constraint,
+    pub dependencies: Vec<Dependency>,
+    pub linking_to: Vec<Dependency>,
+    pub os_type: Option<String>,
+    /// SHA-256 of the source tarball, when the index lists it.
+    pub sha256: Option<String>,
+}
+
+impl Candidate {
+    /// A version from a P3M snapshot's index.
+    pub fn from_index(entry: &IndexEntry, date: &str) -> Candidate {
+        Candidate::from_entry(entry, Origin::Snapshot(date.to_string()))
+    }
+
+    /// A version described by an index entry.
+    pub fn from_entry(entry: &IndexEntry, origin: Origin) -> Candidate {
+        Candidate {
+            version: entry.version.clone(),
+            origin,
+            r_constraint: entry.r_constraint.clone(),
+            dependencies: entry.dependencies.clone(),
+            linking_to: entry.linking_to.clone(),
+            os_type: entry.os_type.clone(),
+            sha256: entry.sha256.clone(),
+        }
+    }
+}
+
+/// Versions of a package with where they come from.
+type Versions = Rc<Vec<(Version, Origin)>>;
 /// Loads the index of a snapshot date.
 type LoadIndex<'a> = Box<dyn Fn(&str) -> Result<Index, SourceError> + 'a>;
 /// Fetches a package's releases with their publication times.
@@ -85,13 +125,18 @@ pub struct SourceError(pub String);
 
 /// Provides the candidate versions of packages.
 pub trait CandidateSource {
-    /// Every version of `name` that may be used, with the snapshot date it comes from, in any
-    /// order. Empty if the package is unknown. This should be cheap: details are fetched only
-    /// for the versions the solver looks at.
-    fn versions(&self, name: &str) -> Result<Vec<(Version, String)>, SourceError>;
+    /// Every version of `name` that may be used, with where it comes from, in any order. Empty
+    /// if the package is unknown. This should be cheap: details are fetched only for the
+    /// versions the solver looks at.
+    fn versions(&self, name: &str) -> Result<Vec<(Version, Origin)>, SourceError>;
 
     /// The details of one version returned by [`CandidateSource::versions`].
-    fn details(&self, name: &str, version: &Version, date: &str) -> Result<Candidate, SourceError>;
+    fn details(
+        &self,
+        name: &str,
+        version: &Version,
+        origin: &Origin,
+    ) -> Result<Candidate, SourceError>;
 }
 
 /// What to resolve.
@@ -106,6 +151,9 @@ pub struct Request {
     pub preferred: HashMap<String, Version>,
     /// Whether `LinkingTo` packages are part of the result (needed to build from source).
     pub include_linking_to: bool,
+    /// For packages without a preferred version, prefer the one from this snapshot date if it
+    /// is allowed (`rok add --latest`: new dependencies come from the project's snapshot).
+    pub prefer_date: Option<String>,
 }
 
 /// A package in the result.
@@ -113,9 +161,11 @@ pub struct Request {
 pub struct Resolved {
     pub name: String,
     pub version: Version,
-    pub date: String,
+    pub origin: Origin,
     /// Names of the packages it needs (base packages excluded), sorted.
     pub dependencies: Vec<String>,
+    /// SHA-256 of the source tarball, when the index listed it.
+    pub sha256: Option<String>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -152,8 +202,9 @@ pub fn resolve(
                 out.push(Resolved {
                     name,
                     version,
-                    date: cand.date.clone(),
+                    origin: cand.origin.clone(),
                     dependencies: deps,
+                    sha256: cand.sha256.clone(),
                 });
             }
             out.sort_by(|a, b| name_order(&a.name, &b.name));
@@ -198,7 +249,7 @@ fn ranges(c: &Constraint) -> Ranges<Version> {
 struct Provider<'a> {
     source: &'a dyn CandidateSource,
     request: &'a Request,
-    /// Versions per package, newest first, with their snapshot dates.
+    /// Versions per package, newest first, with where they come from.
     versions: RefCell<HashMap<String, Versions>>,
     details: RefCell<HashMap<(String, Version), Rc<Candidate>>>,
 }
@@ -224,12 +275,12 @@ impl Provider<'_> {
             return Ok(c.clone());
         }
         let versions = self.versions(name)?;
-        let date = versions
+        let origin = versions
             .iter()
             .find(|(v, _)| v == version)
-            .map(|(_, d)| d.as_str())
+            .map(|(_, o)| o)
             .ok_or_else(|| SourceError(format!("{name} {version} is not a candidate")))?;
-        let cand = Rc::new(self.source.details(name, version, date)?);
+        let cand = Rc::new(self.source.details(name, version, origin)?);
         self.details.borrow_mut().insert(key, cand.clone());
         Ok(cand)
     }
@@ -309,6 +360,14 @@ impl DependencyProvider for Provider<'_> {
                 {
                     return Ok(Some(pref.clone()));
                 }
+                if !self.request.preferred.contains_key(name)
+                    && let Some(date) = &self.request.prefer_date
+                    && let Some((v, _)) = versions
+                        .iter()
+                        .find(|(v, o)| allowed(v) && matches!(o, Origin::Snapshot(d) if d == date))
+                {
+                    return Ok(Some(v.clone()));
+                }
                 Ok(versions
                     .iter()
                     .map(|(v, _)| v)
@@ -368,6 +427,9 @@ pub struct SnapshotSource<'a> {
     history: Option<History<'a>>,
     /// A later snapshot whose versions are also offered (`rok update <package>`).
     newer: Option<String>,
+    /// Packages whose source is fixed by the manifest (a repository or GitHub): only these
+    /// candidates are offered for them.
+    fixed: HashMap<String, Vec<Candidate>>,
 }
 
 struct History<'a> {
@@ -391,7 +453,14 @@ impl<'a> SnapshotSource<'a> {
             locked,
             history: None,
             newer: None,
+            fixed: HashMap::new(),
         }
+    }
+
+    /// Offers only `candidates` for `name` (a package from a repository or GitHub).
+    pub fn with_fixed(mut self, name: &str, candidates: Vec<Candidate>) -> Self {
+        self.fixed.insert(name.to_string(), candidates);
+        self
     }
 
     /// Also offers each package's version in the snapshot of `date` (later than the project's).
@@ -430,35 +499,60 @@ impl<'a> SnapshotSource<'a> {
 }
 
 impl CandidateSource for SnapshotSource<'_> {
-    fn versions(&self, name: &str) -> Result<Vec<(Version, String)>, SourceError> {
+    fn versions(&self, name: &str) -> Result<Vec<(Version, Origin)>, SourceError> {
+        if let Some(fixed) = self.fixed.get(name) {
+            return Ok(fixed
+                .iter()
+                .map(|c| (c.version.clone(), c.origin.clone()))
+                .collect());
+        }
         let mut out = Vec::new();
         if let Some(entry) = self.index(&self.date)?.get(name) {
-            out.push((entry.version.clone(), self.date.clone()));
+            out.push((entry.version.clone(), Origin::Snapshot(self.date.clone())));
         }
         if let Some((version, date)) = self.locked.get(name)
             && out.iter().all(|(v, _)| v != version)
         {
-            out.push((version.clone(), date.clone()));
+            out.push((version.clone(), Origin::Snapshot(date.clone())));
         }
         if let Some(newer) = &self.newer
             && let Some(entry) = self.index(newer)?.get(name)
             && out.iter().all(|(v, _)| v != &entry.version)
         {
-            out.push((entry.version.clone(), newer.clone()));
+            out.push((entry.version.clone(), Origin::Snapshot(newer.clone())));
         }
         if let Some(h) = &self.history
             && h.packages.contains(name)
         {
             for (v, d) in release_snapshots(&(h.fetch)(name)?, &h.dates, &self.date) {
                 if out.iter().all(|(known, _)| known != &v) {
-                    out.push((v, d));
+                    out.push((v, Origin::Snapshot(d)));
                 }
             }
         }
         Ok(out)
     }
 
-    fn details(&self, name: &str, version: &Version, date: &str) -> Result<Candidate, SourceError> {
+    fn details(
+        &self,
+        name: &str,
+        version: &Version,
+        origin: &Origin,
+    ) -> Result<Candidate, SourceError> {
+        let Origin::Snapshot(date) = origin else {
+            return self
+                .fixed
+                .get(name)
+                .and_then(|cs| {
+                    cs.iter()
+                        .find(|c| &c.version == version && &c.origin == origin)
+                })
+                .cloned()
+                .ok_or_else(|| {
+                    SourceError(format!("{name} {version} from {origin} is not a candidate"))
+                });
+        };
+        let date = date.as_str();
         let index = self.index(date)?;
         match index.get(name).filter(|e| &e.version == version) {
             Some(entry) => Ok(Candidate::from_index(entry, date)),
@@ -746,7 +840,8 @@ mod tests {
                 let parse = |s: &str| crate::dcf::parse_dependencies(s).unwrap();
                 map.entry(name.to_string()).or_default().push(Candidate {
                     version: version.parse().unwrap(),
-                    date: "2026-10-01".into(),
+                    origin: Origin::Snapshot("2026-10-01".into()),
+                    sha256: None,
                     r_constraint: if r.is_empty() {
                         Constraint::any()
                     } else {
@@ -762,13 +857,13 @@ mod tests {
     }
 
     impl CandidateSource for Table {
-        fn versions(&self, name: &str) -> Result<Vec<(Version, String)>, SourceError> {
+        fn versions(&self, name: &str) -> Result<Vec<(Version, Origin)>, SourceError> {
             Ok(self
                 .0
                 .get(name)
                 .map(|cs| {
                     cs.iter()
-                        .map(|c| (c.version.clone(), c.date.clone()))
+                        .map(|c| (c.version.clone(), c.origin.clone()))
                         .collect()
                 })
                 .unwrap_or_default())
@@ -778,7 +873,7 @@ mod tests {
             &self,
             name: &str,
             version: &Version,
-            _date: &str,
+            _origin: &Origin,
         ) -> Result<Candidate, SourceError> {
             self.0[name]
                 .iter()
@@ -798,6 +893,7 @@ mod tests {
                 .collect(),
             preferred: HashMap::new(),
             include_linking_to: true,
+            prefer_date: None,
         }
     }
 
@@ -842,7 +938,7 @@ mod tests {
             ["dreamerr 1.4.0", "fixest 0.12.1", "Rcpp 1.1.2"]
         );
         assert_eq!(result[1].dependencies, ["dreamerr", "Rcpp"]);
-        assert_eq!(result[1].date, "2026-10-01");
+        assert_eq!(result[1].origin.to_string(), "2026-10-01");
     }
 
     #[test]
@@ -963,7 +1059,7 @@ mod tests {
         req.preferred.insert("b".into(), "1.1".parse().unwrap());
         let result = resolve(&source, &req).unwrap();
         assert_eq!(versions(&result), ["a 1.0", "b 1.1"]);
-        assert_eq!(result[1].date, "2025-01-02");
+        assert_eq!(result[1].origin.to_string(), "2025-01-02");
         assert!(source.versions("unknown").unwrap().is_empty());
         // A locked version missing from its snapshot is reported, not replaced.
         let wrong = HashMap::from([(
@@ -1014,7 +1110,7 @@ mod tests {
         let got: Vec<String> = resolve(&source, &req)
             .unwrap()
             .iter()
-            .map(|r| format!("{} {} {}", r.name, r.version, r.date))
+            .map(|r| format!("{} {} {}", r.name, r.version, r.origin))
             .collect();
         // sf moves; units must move for it; s2 stays.
         assert_eq!(
@@ -1103,7 +1199,7 @@ mod tests {
         let result = resolve(&source, &request(&[("fixest", "< 0.13")])).unwrap();
         let got: Vec<String> = result
             .iter()
-            .map(|r| format!("{} {} {}", r.name, r.version, r.date))
+            .map(|r| format!("{} {} {}", r.name, r.version, r.origin))
             .collect();
         assert_eq!(got, ["fixest 0.12.1 2025-03-03", "Rcpp 1.1.2 2026-10-01"]);
     }

@@ -40,14 +40,19 @@ enum Command {
     },
     /// Add packages to rok.toml, then update rok.lock and the library.
     Add {
+        /// CRAN package names, or GitHub repositories as owner/repo or owner/repo@ref.
         #[arg(required = true, value_name = "PACKAGE")]
         packages: Vec<String>,
         /// A version constraint, such as "< 0.13" or ">= 1.0, < 2".
         #[arg(long, value_name = "CONSTRAINT")]
         version: Option<String>,
+        /// Take these packages from the latest snapshot, keeping the project's snapshot.
+        #[arg(long)]
+        latest: bool,
     },
     /// Remove packages from rok.toml, then update rok.lock and the library.
     Remove {
+        /// Package names (or owner/repo for GitHub packages).
         #[arg(required = true, value_name = "PACKAGE")]
         packages: Vec<String>,
     },
@@ -60,6 +65,7 @@ enum Command {
     /// Move the snapshot forward and resolve again, or update only the given packages.
     Update {
         /// Update only these packages (and what they need), keeping the project's snapshot.
+        /// GitHub packages can be given as owner/repo.
         #[arg(value_name = "PACKAGE")]
         packages: Vec<String>,
         /// The snapshot date to move to (default: the latest published one).
@@ -102,7 +108,11 @@ fn main() -> ExitCode {
     let project = cli.project.as_deref();
     let result = match cli.command {
         Command::Init { path, r, name } => commands::init(&ui, path, r, name),
-        Command::Add { packages, version } => commands::add(&ui, project, &packages, version),
+        Command::Add {
+            packages,
+            version,
+            latest,
+        } => commands::add(&ui, project, &packages, version, latest),
         Command::Remove { packages } => commands::remove(&ui, project, &packages),
         Command::Sync { locked } => commands::sync(&ui, project, locked),
         Command::Update {

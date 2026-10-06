@@ -6,10 +6,11 @@
 //! (patch versions, mixed snapshot dates, packages rok does not manage). System libraries (4)
 //! and scanner suggestions (5) are added in later steps.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use crate::dcf;
+use crate::install;
 use crate::lockfile::{Lockfile, Source, name_order};
 use crate::manifest::Manifest;
 use crate::ops::{self, manifest_copy};
@@ -47,8 +48,12 @@ pub struct Problem {
 /// An entry of a project library.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Installed {
-    /// A link into rok's cache. `version` is `None` when the link is broken.
-    Linked { version: Option<Version> },
+    /// A link into rok's cache. `version` is `None` when the link is broken; `key` is the
+    /// cache key of the linked build (see `install::Context`).
+    Linked {
+        version: Option<Version>,
+        key: String,
+    },
     /// A directory that rok did not create (for example from `install.packages()`).
     Other { version: Option<Version> },
 }
@@ -56,7 +61,7 @@ pub enum Installed {
 impl Installed {
     pub fn version(&self) -> Option<&Version> {
         match self {
-            Installed::Linked { version } | Installed::Other { version } => version.as_ref(),
+            Installed::Linked { version, .. } | Installed::Other { version } => version.as_ref(),
         }
     }
 }
@@ -78,13 +83,21 @@ pub fn read_library(library: &Path, cache_root: &Path) -> BTreeMap<String, Insta
                     .and_then(|r| r.get("Version"))
                     .and_then(|v| v.parse().ok())
             });
-        let linked = std::fs::read_link(&path).is_ok_and(|t| t.starts_with(cache_root));
+        let target = std::fs::read_link(&path)
+            .ok()
+            .filter(|t| t.starts_with(cache_root));
         out.insert(
             name,
-            if linked {
-                Installed::Linked { version }
-            } else {
-                Installed::Other { version }
+            match target {
+                Some(t) => Installed::Linked {
+                    version,
+                    key: t
+                        .parent()
+                        .and_then(|k| k.file_name())
+                        .map(|k| k.to_string_lossy().into_owned())
+                        .unwrap_or_default(),
+                },
+                None => Installed::Other { version },
             },
         );
     }
@@ -150,13 +163,23 @@ pub fn check(inputs: &Inputs) -> Vec<Problem> {
         for p in &l.packages {
             match library.get(&p.name) {
                 None => details.push(format!("{} {} is not installed", p.name, p.version)),
-                Some(Installed::Linked { version: None }) => details.push(format!(
+                Some(Installed::Linked { version: None, .. }) => details.push(format!(
                     "{} {}: the link to the cache is broken",
                     p.name, p.version
                 )),
                 Some(i) => {
                     if let Some(v) = i.version().filter(|v| *v != &p.version) {
                         details.push(format!("{} is {v}, but rok.lock has {}", p.name, p.version));
+                    } else if let (Source::GitHub { commit, .. }, Installed::Linked { key, .. }) =
+                        (&p.source, i)
+                        && !key.ends_with(&install::github_key_suffix(commit))
+                    {
+                        details.push(format!(
+                            "{} {} is not built from the commit rok.lock records ({})",
+                            p.name,
+                            p.version,
+                            &commit[..7]
+                        ));
                     }
                 }
             }
@@ -199,10 +222,9 @@ pub fn check(inputs: &Inputs) -> Vec<Problem> {
             .packages
             .iter()
             .filter_map(|p| {
-                let Source::Repository { snapshot, .. } = &p.source;
-                snapshot
-                    .as_ref()
-                    .filter(|d| **d != l.snapshot.date)
+                p.source
+                    .snapshot()
+                    .filter(|d| *d != l.snapshot.date)
                     .map(|d| format!("{} {} ({d})", p.name, p.version))
             })
             .collect();
@@ -312,6 +334,42 @@ fn manifest_differences(manifest: &Manifest, lock: &Lockfile) -> Vec<String> {
             out.push(format!("{name}: the version constraint was removed"));
         }
     }
+    let kept = |n: &String| lock.manifest.dependencies.contains(n);
+    for (name, key) in &now.sources {
+        if kept(name) && lock.manifest.sources.get(name) != Some(key) {
+            out.push(format!("{name}: the source changed to `{key}`"));
+        }
+    }
+    for name in lock.manifest.sources.keys() {
+        if !now.sources.contains_key(name) && now.dependencies.contains(name) {
+            out.push(format!("{name}: the source changed to CRAN"));
+        }
+    }
+    let mut urls = BTreeSet::new();
+    for p in &lock.packages {
+        if let Some(d) = manifest.dependency(&p.name)
+            && kept(&p.name)
+            && d.env != p.env
+        {
+            out.push(format!(
+                "{}: the build environment variables changed",
+                p.name
+            ));
+        }
+        if let Source::Repository {
+            repository,
+            url: Some(url),
+            ..
+        } = &p.source
+            && let Some(now) = manifest.repositories.get(repository)
+            && now != url
+        {
+            urls.insert(format!(
+                "[repositories] {repository}: the URL changed to {now}"
+            ));
+        }
+    }
+    out.extend(urls);
     out
 }
 
@@ -358,12 +416,14 @@ mod tests {
                 "fixest".to_string(),
                 Installed::Linked {
                     version: Some("0.12.1".parse().unwrap()),
+                    key: "k".into(),
                 },
             ),
             (
                 "Rcpp".to_string(),
                 Installed::Linked {
                     version: Some("1.1.2".parse().unwrap()),
+                    key: "k".into(),
                 },
             ),
         ]);
@@ -379,13 +439,63 @@ mod tests {
     }
 
     #[test]
+    fn checks_github_packages_by_commit() {
+        let commit = "a".repeat(40);
+        let l = Lockfile::parse(&format!(
+            "version = 1\ngenerated-by = \"rok\"\n[r]\nversion = \"4.6.1\"\n[snapshot]\ndate = \"2026-10-01\"\nrepository = \"x\"\n\
+             [manifest]\ndependencies = [\"praise\"]\nsources = {{ praise = \"github:o/praise\" }}\n\
+             [[package]]\nname = \"praise\"\nversion = \"1.0.0\"\nsource = {{ github = \"o/praise\", commit = \"{commit}\" }}\n"
+        ))
+        .unwrap();
+        let linked = |key: &str| {
+            BTreeMap::from([(
+                "praise".to_string(),
+                Installed::Linked {
+                    version: Some("1.0.0".parse().unwrap()),
+                    key: key.into(),
+                },
+            )])
+        };
+        let (m, r) = (manifest("praise = { github = \"o/praise\" }"), r("4.6.1"));
+        let run = |lib: &BTreeMap<String, Installed>, m: &Manifest| {
+            check(&Inputs {
+                manifest: m,
+                lock: Some(&l),
+                r: Some(&r),
+                library: lib,
+            })
+        };
+        assert!(run(&linked("4.6-x-source-gh-aaaaaaaaaaaa"), &m).is_empty());
+        let other = run(&linked("4.6-x-source-gh-bbbbbbbbbbbb"), &m);
+        assert_eq!(codes(&other), ["library-mismatch"]);
+        assert_eq!(
+            other[0].details,
+            ["praise 1.0.0 is not built from the commit rok.lock records (aaaaaaa)"]
+        );
+        let tagged = manifest("praise = { github = \"o/praise\", tag = \"v1\" }");
+        let changed = run(&linked("4.6-x-source-gh-aaaaaaaaaaaa"), &tagged);
+        assert_eq!(codes(&changed), ["lock-outdated"]);
+        assert_eq!(
+            changed[0].details,
+            ["praise: the source changed to `github:o/praise#tag=v1`"]
+        );
+    }
+
+    #[test]
     fn orders_problems_by_severity() {
         let lib = BTreeMap::from([
-            ("fixest".to_string(), Installed::Linked { version: None }),
+            (
+                "fixest".to_string(),
+                Installed::Linked {
+                    version: None,
+                    key: "k".into(),
+                },
+            ),
             (
                 "old".to_string(),
                 Installed::Linked {
                     version: Some("1.0".parse().unwrap()),
+                    key: "k".into(),
                 },
             ),
             (
@@ -457,10 +567,17 @@ mod tests {
         assert_eq!(
             entries["R6"],
             Installed::Linked {
-                version: Some("2.6.1".parse().unwrap())
+                version: Some("2.6.1".parse().unwrap()),
+                key: "k".into(),
             }
         );
-        assert_eq!(entries["gone"], Installed::Linked { version: None });
+        assert_eq!(
+            entries["gone"],
+            Installed::Linked {
+                version: None,
+                key: "k".into()
+            }
+        );
         assert_eq!(entries["mine"], Installed::Other { version: None });
     }
 }

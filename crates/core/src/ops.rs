@@ -4,16 +4,24 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use crate::cache::PackageCache;
+use crate::constraint::Constraint;
+use crate::dcf::Dependency;
+use crate::github::{GitHub, GitHubError};
 use crate::http::Http;
 use crate::install::{self, Built, Context, InstallError, LinkReport, Plan, Wanted};
-use crate::lockfile::{LockedPackage, Lockfile, ManifestCopy, Snapshot, Source, name_order};
-use crate::manifest::{DependencySource, Manifest};
-use crate::p3m::{self, P3m, P3mError};
+use crate::lockfile::{
+    LockedPackage, Lockfile, ManifestCopy, Remote, Snapshot, Source, name_order,
+};
+use crate::manifest::{DependencySource, DependencySpec, GitRef, Manifest};
+use crate::p3m::{self, Index, IndexEntry, P3m, P3mError};
 use crate::par;
 use crate::paths::{PathsError, UserDirs};
 use crate::platform::Platform;
 use crate::rdetect::{self, RInstallation};
-use crate::resolve::{self, Request, ResolveError, SnapshotSource, SourceError};
+use crate::repo::{self, RepoError, Repositories};
+use crate::resolve::{
+    self, Candidate, Origin, Request, ResolveError, Resolved, SnapshotSource, SourceError,
+};
 use crate::version::Version;
 
 #[derive(Debug, thiserror::Error)]
@@ -24,11 +32,15 @@ pub enum OpError {
     P3m(#[from] P3mError),
     #[error(transparent)]
     Resolve(#[from] ResolveError),
+    #[error(transparent)]
+    Repo(#[from] RepoError),
+    #[error(transparent)]
+    GitHub(#[from] GitHubError),
     /// Boxed: installation errors carry several strings, and errors are passed around often.
     #[error(transparent)]
     Install(Box<InstallError>),
     #[error("{0}")]
-    Unsupported(String),
+    Message(String),
 }
 
 impl From<InstallError> for OpError {
@@ -67,6 +79,10 @@ impl Env {
         })
     }
 
+    pub fn github(&self) -> GitHub<'_> {
+        GitHub::new(&self.http)
+    }
+
     pub fn r_installations(&self) -> Vec<RInstallation> {
         rdetect::find_installations(&self.dirs, std::env::var_os("PATH"))
     }
@@ -75,6 +91,8 @@ impl Env {
         Context {
             http: &self.http,
             p3m: &self.p3m,
+            repos: Repositories::new(&self.http, &self.dirs),
+            github: self.github(),
             cache: &self.cache,
             platform: &self.platform,
             r,
@@ -131,35 +149,86 @@ pub fn manifest_copy(manifest: &Manifest) -> ManifestCopy {
         .map(|(n, _)| n.clone())
         .collect();
     dependencies.sort_by(|a, b| name_order(a, b));
+    let sources = manifest
+        .dependencies
+        .iter()
+        .filter_map(|(n, spec)| source_key(spec).map(|k| (n.clone(), k)))
+        .collect();
     ManifestCopy {
         dependencies,
         constraints,
+        sources,
     }
 }
 
-/// Whether the lockfile was made from the manifest as it is now.
+/// A declaration's source in a canonical form, for the lockfile's copy of the manifest:
+/// `None` for CRAN, `repo:<alias>`, or `github:<owner>/<repo>` followed by `#branch=…`,
+/// `#tag=…` or `#rev=…` and `#track`.
+pub fn source_key(spec: &DependencySpec) -> Option<String> {
+    match &spec.source {
+        DependencySource::Cran { .. } => None,
+        DependencySource::Repository { alias, .. } => Some(format!("repo:{alias}")),
+        DependencySource::GitHub {
+            owner,
+            repo,
+            reference,
+            track,
+        } => {
+            let mut key = format!("github:{owner}/{repo}");
+            match reference {
+                GitRef::DefaultBranch => {}
+                GitRef::Branch(b) => key.push_str(&format!("#branch={b}")),
+                GitRef::Tag(t) => key.push_str(&format!("#tag={t}")),
+                GitRef::Rev(r) => key.push_str(&format!("#rev={r}")),
+            }
+            if *track {
+                key.push_str("#track");
+            }
+            Some(key)
+        }
+    }
+}
+
+/// Whether the lockfile was made from the manifest as it is now: the same snapshot, R,
+/// declarations, repository URLs and build-time environment variables.
 pub fn lock_is_current(manifest: &Manifest, lock: &Lockfile) -> bool {
     let (minor, patch) = manifest_r(manifest);
     lock.snapshot.date == manifest.project.snapshot
         && lock.r.minor() == minor
         && patch.is_none_or(|p| p == &lock.r)
         && lock.manifest == manifest_copy(manifest)
+        && lock.packages.iter().all(|p| {
+            let env = manifest.dependency(&p.name).map(|d| &d.env);
+            let env_ok = env.map_or(p.env.is_empty(), |e| *e == p.env);
+            let url_ok = match &p.source {
+                Source::Repository {
+                    repository, url, ..
+                } if repository != "cran" => manifest.repositories.get(repository) == url.as_ref(),
+                _ => true,
+            };
+            env_ok && url_ok
+        })
+}
+
+/// How much of the old lockfile a resolution keeps.
+#[derive(Debug, Clone, Default)]
+pub struct Keep {
+    /// Packages whose locked version (or GitHub commit) is not preferred
+    /// (`rok update <package>`).
+    pub unlock: HashSet<String>,
+    /// Ignore the old versions altogether (`rok update` without packages). GitHub packages
+    /// keep their commit unless declared with `track = true`.
+    pub nothing: bool,
+    /// A later snapshot to offer newer versions from (`rok update <package>`, `rok add --latest`).
+    pub newer: Option<String>,
+    /// Packages to take from the `newer` snapshot, while the other packages new to the
+    /// lockfile still come from the project's snapshot when they can (`rok add --latest`).
+    pub latest: HashSet<String>,
 }
 
 /// Resolves the manifest into a lockfile. Versions in `old` are kept when allowed; their
 /// SHA-256 values are carried over, and missing ones are looked up on P3M (case B: only the
 /// current CRAN version has one).
-/// How much of the old lockfile a resolution keeps.
-#[derive(Debug, Clone, Default)]
-pub struct Keep {
-    /// Packages whose locked version is not preferred (`rok update <package>`).
-    pub unlock: HashSet<String>,
-    /// Ignore the old versions altogether (`rok update` without packages).
-    pub nothing: bool,
-    /// A later snapshot to offer newer versions from (`rok update <package>`).
-    pub newer: Option<String>,
-}
-
 pub fn resolve_lock(
     env: &Env,
     manifest: &Manifest,
@@ -177,52 +246,143 @@ pub fn resolve_lock_with(
     r_version: &Version,
     keep: &Keep,
 ) -> Result<Lockfile, OpError> {
+    let date = &manifest.project.snapshot;
+    let kept = if keep.nothing { None } else { old };
+    let repos = Repositories::new(&env.http, &env.dirs);
+    let github = env.github();
+
+    // Packages from a repository or GitHub are offered only from there.
     let mut requirements = Vec::new();
+    let mut fixed: Vec<(String, Vec<Candidate>)> = Vec::new();
     for (name, spec) in &manifest.dependencies {
         match &spec.source {
             DependencySource::Cran { constraint } => {
-                requirements.push((name.clone(), constraint.clone()))
+                requirements.push((name.clone(), constraint.clone()));
             }
-            DependencySource::Repository { .. } => {
-                return Err(OpError::Unsupported(format!(
-                    "{name}: packages from [repositories] are not supported yet"
-                )));
+            DependencySource::Repository { alias, constraint } => {
+                requirements.push((name.clone(), constraint.clone()));
+                let url = &manifest.repositories[alias];
+                let origin = Origin::Repository {
+                    alias: alias.clone(),
+                    url: url.clone(),
+                };
+                let mut candidates = Vec::new();
+                if let Some(e) = repos.source_index(url)?.get(name) {
+                    candidates.push(Candidate::from_entry(e, origin.clone()));
+                }
+                // The repository keeps only its newest version; the locked one is reproduced
+                // from the cache (requirements, chapter 7).
+                if let Some(p) = kept
+                    .and_then(|l| l.package(name))
+                    .filter(|p| same_origin(&p.source, &origin))
+                    && candidates.iter().all(|c| c.version != p.version)
+                {
+                    candidates.push(candidate_from_lock(p, origin.clone()));
+                }
+                if candidates.is_empty() {
+                    return Err(OpError::Message(format!(
+                        "{name} is not in the `{alias}` repository ({url})."
+                    )));
+                }
+                fixed.push((name.clone(), candidates));
             }
-            DependencySource::GitHub { .. } => {
-                return Err(OpError::Unsupported(format!(
-                    "{name}: GitHub packages are not supported yet"
-                )));
+            DependencySource::GitHub {
+                owner,
+                repo,
+                reference,
+                track,
+            } => {
+                requirements.push((name.clone(), Constraint::any()));
+                // The locked commit stays unless the package is updated by name, or tracked
+                // and the whole project is updated.
+                let locked = old
+                    .and_then(|l| l.package(name))
+                    .and_then(|p| match &p.source {
+                        Source::GitHub {
+                            owner: o,
+                            repo: r,
+                            reference: re,
+                            commit,
+                        } if o == owner && r == repo && re == reference => Some((p, commit)),
+                        _ => None,
+                    });
+                let candidate = match locked {
+                    Some((p, commit))
+                        if !(keep.unlock.contains(name) || keep.nothing && *track) =>
+                    {
+                        let origin = Origin::GitHub {
+                            owner: owner.clone(),
+                            repo: repo.clone(),
+                            reference: reference.clone(),
+                            commit: commit.clone(),
+                        };
+                        candidate_from_lock(p, origin)
+                    }
+                    _ => {
+                        let (entry, commit) = read_github(&github, owner, repo, reference)?;
+                        if entry.name != *name {
+                            return Err(OpError::Message(format!(
+                                "{owner}/{repo} is the package `{}`, not `{name}`.",
+                                entry.name
+                            )));
+                        }
+                        let origin = Origin::GitHub {
+                            owner: owner.clone(),
+                            repo: repo.clone(),
+                            reference: reference.clone(),
+                            commit,
+                        };
+                        Candidate::from_entry(&entry, origin)
+                    }
+                };
+                fixed.push((name.clone(), vec![candidate]));
             }
         }
     }
-    let date = &manifest.project.snapshot;
+
     let mut preferred = HashMap::new();
     let mut locked = HashMap::new();
-    let kept = if keep.nothing { None } else { old };
     for p in kept.map(|l| l.packages.as_slice()).unwrap_or_default() {
-        let Source::Repository {
+        if !keep.unlock.contains(&p.name) {
+            preferred.insert(p.name.clone(), p.version.clone());
+        }
+        if let Source::Repository {
             repository,
-            snapshot,
-        } = &p.source;
-        if repository == "cran" {
-            if !keep.unlock.contains(&p.name) {
-                preferred.insert(p.name.clone(), p.version.clone());
-            }
-            if let Some(d) = snapshot {
-                locked.insert(p.name.clone(), (p.version.clone(), d.clone()));
-            }
+            snapshot: Some(d),
+            ..
+        } = &p.source
+            && repository == "cran"
+        {
+            locked.insert(p.name.clone(), (p.version.clone(), d.clone()));
         }
     }
+    let mut prefer_date = None;
+    if let Some(newer) = &keep.newer
+        && !keep.latest.is_empty()
+    {
+        let index = env.p3m.index(newer)?;
+        for name in &keep.latest {
+            if let Some(e) = index.get(name) {
+                preferred.insert(name.clone(), e.version.clone());
+            }
+        }
+        prefer_date = Some(date.clone());
+    }
+
     let load = |d: &str| env.p3m.index(d).map_err(|e| SourceError(e.to_string()));
     // Declared constraints that exclude the snapshot's version need older releases: they are
     // taken from the past snapshots in which they were current (requirements, chapter 7).
     let index = env.p3m.index(date)?;
     let historical: HashSet<String> = requirements
         .iter()
+        .filter(|(name, _)| fixed.iter().all(|(f, _)| f != name))
         .filter(|(name, c)| index.get(name).is_some_and(|e| !c.matches(&e.version)))
         .map(|(name, _)| name.clone())
         .collect();
     let mut source = SnapshotSource::new(date, load, locked);
+    for (name, candidates) in fixed {
+        source = source.with_fixed(&name, candidates);
+    }
     if let Some(newer) = &keep.newer {
         source = source.with_newer(newer);
     }
@@ -240,42 +400,74 @@ pub fn resolve_lock_with(
         requirements,
         preferred,
         include_linking_to: true,
+        prefer_date,
     };
     let resolved = resolve::resolve(&source, &request)?;
 
-    let previous: HashMap<(&str, &Version), &Option<String>> = old
-        .map(|l| {
-            l.packages
-                .iter()
-                .map(|p| ((p.name.as_str(), &p.version), &p.sha256))
-                .collect()
-        })
+    let previous: HashMap<&str, &LockedPackage> = old
+        .map(|l| l.packages.iter().map(|p| (p.name.as_str(), p)).collect())
         .unwrap_or_default();
-    let known: Vec<Option<String>> = resolved
-        .iter()
-        .map(|r| {
-            previous
-                .get(&(r.name.as_str(), &r.version))
-                .and_then(|h| (*h).clone())
-        })
-        .collect();
+    let same = |r: &Resolved| {
+        previous
+            .get(r.name.as_str())
+            .copied()
+            .filter(|p| p.version == r.version && same_origin(&p.source, &r.origin))
+    };
     let looked_up = par::map(&resolved, env.jobs, |r| {
-        env.p3m.source_checksum(&r.name, &r.version).ok().flatten()
+        let known = same(r).is_some_and(|p| p.sha256.is_some());
+        match &r.origin {
+            Origin::Snapshot(_) if !known => {
+                env.p3m.source_checksum(&r.name, &r.version).ok().flatten()
+            }
+            _ => None,
+        }
     });
-    let packages = resolved
-        .into_iter()
-        .zip(known.into_iter().zip(looked_up))
-        .map(|(r, (known, looked_up))| LockedPackage {
-            name: r.name,
-            version: r.version,
-            source: Source::Repository {
+    let mut packages = Vec::new();
+    for (r, looked_up) in resolved.iter().zip(looked_up) {
+        let prev = same(r);
+        let source = match &r.origin {
+            Origin::Snapshot(d) => Source::Repository {
                 repository: "cran".to_string(),
-                snapshot: Some(r.date),
+                url: None,
+                snapshot: Some(d.clone()),
+                remote: None,
             },
-            dependencies: r.dependencies,
-            sha256: known.or(looked_up),
-        })
-        .collect();
+            Origin::Repository { alias, url } => Source::Repository {
+                repository: alias.clone(),
+                url: Some(url.clone()),
+                snapshot: None,
+                remote: prev.and_then(|p| match &p.source {
+                    Source::Repository { remote, .. } => remote.clone(),
+                    Source::GitHub { .. } => None,
+                }),
+            },
+            Origin::GitHub {
+                owner,
+                repo,
+                reference,
+                commit,
+            } => Source::GitHub {
+                owner: owner.clone(),
+                repo: repo.clone(),
+                reference: reference.clone(),
+                commit: commit.clone(),
+            },
+        };
+        packages.push(LockedPackage {
+            name: r.name.clone(),
+            version: r.version.clone(),
+            source,
+            dependencies: r.dependencies.clone(),
+            sha256: prev
+                .and_then(|p| p.sha256.clone())
+                .or_else(|| r.sha256.clone())
+                .or(looked_up),
+            env: manifest
+                .dependency(&r.name)
+                .map(|d| d.env.clone())
+                .unwrap_or_default(),
+        });
+    }
     Ok(Lockfile {
         generated_by: format!("rok {}", env!("CARGO_PKG_VERSION")),
         r: r_version.clone(),
@@ -288,40 +480,135 @@ pub fn resolve_lock_with(
     })
 }
 
+/// Whether a locked source is where a resolved version comes from (snapshot dates aside).
+fn same_origin(source: &Source, origin: &Origin) -> bool {
+    match (source, origin) {
+        (Source::Repository { repository, .. }, Origin::Snapshot(_)) => repository == "cran",
+        (
+            Source::Repository {
+                repository, url, ..
+            },
+            Origin::Repository { alias, url: u },
+        ) => repository == alias && url.as_ref() == Some(u),
+        (
+            Source::GitHub {
+                owner,
+                repo,
+                commit,
+                ..
+            },
+            Origin::GitHub {
+                owner: o,
+                repo: r,
+                commit: c,
+                ..
+            },
+        ) => owner == o && repo == r && commit == c,
+        _ => false,
+    }
+}
+
+/// A candidate made from the lockfile, for a version its source no longer lists or a GitHub
+/// commit that need not be looked up again. Its dependencies are known by name only.
+fn candidate_from_lock(p: &LockedPackage, origin: Origin) -> Candidate {
+    Candidate {
+        version: p.version.clone(),
+        origin,
+        r_constraint: Constraint::any(),
+        dependencies: p
+            .dependencies
+            .iter()
+            .map(|d| Dependency {
+                name: d.clone(),
+                constraint: Constraint::any(),
+            })
+            .collect(),
+        linking_to: Vec::new(),
+        os_type: None,
+        sha256: p.sha256.clone(),
+    }
+}
+
+/// Resolves a GitHub reference to a commit and reads the package's DESCRIPTION there.
+pub fn read_github(
+    github: &GitHub,
+    owner: &str,
+    repo: &str,
+    reference: &GitRef,
+) -> Result<(IndexEntry, String), OpError> {
+    let commit = github.resolve(owner, repo, reference)?;
+    let text = github.description(owner, repo, &commit)?;
+    let index = Index::parse_repository(&format!("{owner}/{repo}"), &text);
+    match index.iter().next() {
+        Some(e) => Ok((e.clone(), commit)),
+        None => Err(OpError::Message(format!(
+            "{owner}/{repo}: cannot read its DESCRIPTION{}",
+            index
+                .skipped
+                .first()
+                .map(|(_, why)| format!(" ({why})"))
+                .unwrap_or_default()
+        ))),
+    }
+}
+
 /// A change of one package between two lockfiles.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Change {
     pub name: String,
     pub from: Option<Version>,
     pub to: Option<Version>,
+    /// Where the package comes from, when that is worth showing: a source other than CRAN for
+    /// an added package, or `old → new` when the source or GitHub commit changed.
+    pub note: Option<String>,
 }
 
-/// The packages added, removed or changed from `old` to `new`, sorted by name.
+/// Where a locked package comes from, for change lists: `CRAN`, a repository alias, or
+/// `owner/repo@commit`.
+pub fn origin_label(source: &Source) -> String {
+    match source {
+        Source::Repository { repository, .. } if repository == "cran" => "CRAN".to_string(),
+        Source::Repository { repository, .. } => repository.clone(),
+        Source::GitHub {
+            owner,
+            repo,
+            commit,
+            ..
+        } => format!("{owner}/{repo}@{}", &commit[..commit.len().min(7)]),
+    }
+}
+
+/// The packages added, removed or changed (in version or source) from `old` to `new`,
+/// sorted by name.
 pub fn diff(old: Option<&Lockfile>, new: &Lockfile) -> Vec<Change> {
-    let before: HashMap<&str, &Version> = old
-        .map(|l| {
-            l.packages
-                .iter()
-                .map(|p| (p.name.as_str(), &p.version))
-                .collect()
-        })
-        .unwrap_or_default();
-    let after: HashMap<&str, &Version> = new
-        .packages
-        .iter()
-        .map(|p| (p.name.as_str(), &p.version))
-        .collect();
-    let mut names: Vec<&str> = before.keys().chain(after.keys()).copied().collect();
+    let entries = |l: &Lockfile| -> HashMap<String, (Version, String)> {
+        l.packages
+            .iter()
+            .map(|p| (p.name.clone(), (p.version.clone(), origin_label(&p.source))))
+            .collect()
+    };
+    let before = old.map(entries).unwrap_or_default();
+    let after = entries(new);
+    let mut names: Vec<&String> = before.keys().chain(after.keys()).collect();
     names.sort_by(|a, b| name_order(a, b));
     names.dedup();
     names
         .into_iter()
         .filter_map(|n| {
-            let (from, to) = (before.get(n).copied(), after.get(n).copied());
-            (from != to).then(|| Change {
-                name: n.to_string(),
-                from: from.cloned(),
-                to: to.cloned(),
+            let (from, to) = (before.get(n), after.get(n));
+            if from == to {
+                return None;
+            }
+            let note = match (from, to) {
+                (None, Some((_, s))) if s != "CRAN" => Some(s.clone()),
+                (Some((_, a)), Some((_, b))) if a != b => Some(format!("{a} → {b}")),
+                _ => None,
+            };
+            Some(Change {
+                name: n.clone(),
+                from: from.map(|(v, _)| v.clone()),
+                to: to.map(|(v, _)| v.clone()),
+                note,
             })
         })
         .collect()
@@ -345,7 +632,7 @@ impl SyncPlan {
     pub fn downloads(&self) -> usize {
         self.items
             .iter()
-            .filter(|(_, p)| matches!(p, Plan::Binary(_)))
+            .filter(|(_, p)| matches!(p, Plan::Binary { .. }))
             .count()
     }
 }
@@ -357,26 +644,56 @@ pub fn plan_sync(
     manifest: &Manifest,
     r: &RInstallation,
 ) -> Result<SyncPlan, OpError> {
-    let wanted: Vec<Wanted> = lock
+    let wanted = lock
         .packages
         .iter()
         .map(|p| {
-            let Source::Repository { snapshot, .. } = &p.source;
-            Wanted {
+            let origin = match &p.source {
+                Source::Repository {
+                    repository,
+                    snapshot,
+                    ..
+                } if repository == "cran" => Origin::Snapshot(
+                    snapshot
+                        .clone()
+                        .unwrap_or_else(|| lock.snapshot.date.clone()),
+                ),
+                Source::Repository {
+                    repository, url, ..
+                } => Origin::Repository {
+                    alias: repository.clone(),
+                    url: url
+                        .clone()
+                        .or_else(|| manifest.repositories.get(repository).cloned())
+                        .ok_or_else(|| {
+                            OpError::Message(format!(
+                                "{}: rok.lock does not record the URL of the `{repository}` repository, and rok.toml does not declare it.",
+                                p.name
+                            ))
+                        })?,
+                },
+                Source::GitHub {
+                    owner,
+                    repo,
+                    reference,
+                    commit,
+                } => Origin::GitHub {
+                    owner: owner.clone(),
+                    repo: repo.clone(),
+                    reference: reference.clone(),
+                    commit: commit.clone(),
+                },
+            };
+            Ok(Wanted {
                 name: p.name.clone(),
                 version: p.version.clone(),
-                date: snapshot
-                    .clone()
-                    .unwrap_or_else(|| lock.snapshot.date.clone()),
+                origin,
                 dependencies: p.dependencies.clone(),
                 sha256: p.sha256.clone(),
-                env: manifest
-                    .dependency(&p.name)
-                    .map(|d| d.env.clone())
-                    .unwrap_or_default(),
-            }
+                env: p.env.clone(),
+            })
         })
-        .collect();
+        .collect::<Result<Vec<Wanted>, OpError>>()?;
     let plans = env.context(r).assess(&wanted)?;
     Ok(SyncPlan {
         items: wanted.into_iter().zip(plans).collect(),
@@ -389,6 +706,8 @@ pub struct SyncReport {
     pub downloaded: usize,
     pub built: Vec<Built>,
     pub link: LinkReport,
+    /// Every package of the library with its path in the cache.
+    pub paths: Vec<(String, PathBuf)>,
 }
 
 /// Carries out a plan: downloads binaries, builds sources, then links the library.
@@ -407,7 +726,9 @@ pub fn execute_sync(
             Plan::Cached(path) => {
                 paths.insert(w.name.clone(), path.clone());
             }
-            Plan::Binary(url) => binaries.push((w, url.as_str())),
+            Plan::Binary { url, key, sha256 } => {
+                binaries.push((w, url.as_str(), key.as_str(), sha256.as_deref()))
+            }
             Plan::Source => {}
         }
     }
@@ -434,6 +755,7 @@ pub fn execute_sync(
         downloaded: binaries.len(),
         built,
         link,
+        paths: all,
     })
 }
 
@@ -449,6 +771,29 @@ pub fn record_built_checksums(lock: &mut Lockfile, built: &[Built]) -> bool {
         {
             p.sha256 = Some(h.clone());
             changed = true;
+        }
+    }
+    changed
+}
+
+/// Records `RemoteUrl` and `RemoteSha` of packages from repositories other than CRAN, read from
+/// their DESCRIPTION, so a release the repository drops can be rebuilt from Git (requirements,
+/// chapter 7). Returns whether the lockfile changed.
+pub fn record_remotes(lock: &mut Lockfile, paths: &[(String, PathBuf)]) -> bool {
+    let mut changed = false;
+    for (name, path) in paths {
+        if let Some(p) = lock.packages.iter_mut().find(|p| &p.name == name)
+            && let Source::Repository {
+                repository, remote, ..
+            } = &mut p.source
+            && repository != "cran"
+            && let Some((url, sha)) = repo::remote_of(path)
+        {
+            let found = Some(Remote { url, sha });
+            if *remote != found {
+                *remote = found;
+                changed = true;
+            }
         }
     }
     changed
@@ -530,6 +875,116 @@ mod tests {
             ]
         );
         assert_eq!(diff(None, &new).len(), 3);
+    }
+
+    #[test]
+    fn notes_source_changes() {
+        let mut old = lock(&[("a", "1.0"), ("b", "1.0")]);
+        let mut new = lock(&[("a", "1.0"), ("b", "1.0"), ("c", "2.0")]);
+        let gh = |commit: &str| Source::GitHub {
+            owner: "o".into(),
+            repo: "a".into(),
+            reference: GitRef::DefaultBranch,
+            commit: commit.repeat(40),
+        };
+        old.packages[0].source = gh("1");
+        new.packages[0].source = gh("2");
+        new.packages[2].source = Source::Repository {
+            repository: "multiverse".into(),
+            url: Some("https://x".into()),
+            snapshot: None,
+            remote: None,
+        };
+        let changes = diff(Some(&old), &new);
+        let notes: Vec<(&str, Option<&str>)> = changes
+            .iter()
+            .map(|c| (c.name.as_str(), c.note.as_deref()))
+            .collect();
+        assert_eq!(
+            notes,
+            [
+                ("a", Some("o/a@1111111 → o/a@2222222")),
+                ("c", Some("multiverse"))
+            ]
+        );
+        assert_eq!(changes[0].from, changes[0].to);
+    }
+
+    #[test]
+    fn keys_sources() {
+        let m = Manifest::parse(
+            "[project]\nname = \"p\"\nr = \"4.6\"\nsnapshot = \"2026-10-01\"\n[repositories]\nmv = \"https://x\"\n[dependencies]\na = \"*\"\nb = { repo = \"mv\" }\nc = { github = \"o/c\", branch = \"dev\", track = true }\nd = { github = \"o/d\", rev = \"abc1234\" }\n",
+        )
+        .unwrap();
+        let copy = manifest_copy(&m);
+        assert_eq!(
+            copy.sources.into_iter().collect::<Vec<_>>(),
+            [
+                ("b".to_string(), "repo:mv".to_string()),
+                ("c".to_string(), "github:o/c#branch=dev#track".to_string()),
+                ("d".to_string(), "github:o/d#rev=abc1234".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn stale_when_env_or_repository_url_changes() {
+        let text = |env: &str, url: &str| {
+            format!(
+                "[project]\nname = \"p\"\nr = \"4.6\"\nsnapshot = \"2026-10-01\"\n[repositories]\nmv = \"{url}\"\n[dependencies]\na = {{ repo = \"mv\"{env} }}\n"
+            )
+        };
+        let m = Manifest::parse(&text(", env = { X = \"1\" }", "https://x")).unwrap();
+        let mut l = lock(&[("a", "1.0")]);
+        l.manifest = manifest_copy(&m);
+        l.packages[0].source = Source::Repository {
+            repository: "mv".into(),
+            url: Some("https://x".into()),
+            snapshot: None,
+            remote: None,
+        };
+        l.packages[0].env = BTreeMap::from([("X".to_string(), "1".to_string())]);
+        assert!(lock_is_current(&m, &l));
+        let no_env = Manifest::parse(&text("", "https://x")).unwrap();
+        assert!(!lock_is_current(&no_env, &l));
+        let moved = Manifest::parse(&text(", env = { X = \"1\" }", "https://y")).unwrap();
+        assert!(!lock_is_current(&moved, &l));
+    }
+
+    #[test]
+    fn records_remotes_of_repository_packages() {
+        let t = tempfile::tempdir().unwrap();
+        let dir = t.path().join("a");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("DESCRIPTION"),
+            "Package: a\nVersion: 1.0\nRemoteUrl: https://github.com/o/a\nRemoteSha: abc\n",
+        )
+        .unwrap();
+        let mut l = lock(&[("a", "1.0")]);
+        let paths = [("a".to_string(), dir)];
+        assert!(
+            !record_remotes(&mut l, &paths),
+            "CRAN packages are left alone"
+        );
+        l.packages[0].source = Source::Repository {
+            repository: "mv".into(),
+            url: Some("https://x".into()),
+            snapshot: None,
+            remote: None,
+        };
+        assert!(record_remotes(&mut l, &paths));
+        assert!(!record_remotes(&mut l, &paths), "already recorded");
+        let Source::Repository { remote, .. } = &l.packages[0].source else {
+            unreachable!()
+        };
+        assert_eq!(
+            remote,
+            &Some(Remote {
+                url: "https://github.com/o/a".into(),
+                sha: "abc".into()
+            })
+        );
     }
 
     #[test]

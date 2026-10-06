@@ -402,6 +402,12 @@ pub struct IndexEntry {
     pub needs_compilation: bool,
     /// `OS_type` (`unix` or `windows`), when the package is limited to one.
     pub os_type: Option<String>,
+    /// `SHA256` of the file, in indexes that have it (R-multiverse, r-universe).
+    pub sha256: Option<String>,
+    /// `Path`: where the file is, relative to the index (r-universe uses it for every package).
+    pub path: Option<String>,
+    /// Whether the index lists a binary (it has a `Built` field).
+    pub built: bool,
 }
 
 /// A snapshot's package index.
@@ -414,9 +420,18 @@ pub struct Index {
 }
 
 impl Index {
-    /// Parses PACKAGES text. Records with a `Path` field (R-devel's recommended packages) are
-    /// ignored; unreadable records are listed in `skipped`.
+    /// Parses a P3M PACKAGES text. Records with a `Path` field (R-devel's recommended packages)
+    /// are ignored; unreadable records are listed in `skipped`.
     pub fn parse(date: &str, text: &str) -> Index {
+        Index::parse_with(date, text, false)
+    }
+
+    /// Parses the PACKAGES text of another CRAN-like repository, keeping `Path` records.
+    pub fn parse_repository(label: &str, text: &str) -> Index {
+        Index::parse_with(label, text, true)
+    }
+
+    fn parse_with(date: &str, text: &str, keep_path: bool) -> Index {
         let mut index = Index {
             date: date.to_string(),
             ..Default::default()
@@ -429,7 +444,7 @@ impl Index {
             }
         };
         for rec in records {
-            if rec.get("Path").is_some() {
+            if !keep_path && rec.get("Path").is_some() {
                 continue;
             }
             let name = rec.get("Package").unwrap_or("").to_string();
@@ -500,6 +515,12 @@ fn entry_from_record(rec: &dcf::Record) -> Result<IndexEntry, String> {
         linking_to,
         needs_compilation: rec.get("NeedsCompilation") == Some("yes"),
         os_type: rec.get("OS_type").map(str::to_string),
+        sha256: rec
+            .get("SHA256")
+            .filter(|h| h.len() == 64)
+            .map(str::to_ascii_lowercase),
+        path: rec.get("Path").map(str::to_string),
+        built: rec.get("Built").is_some(),
     })
 }
 
