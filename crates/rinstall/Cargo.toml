@@ -4,4 +4,6 @@ description = "Installation of R itself for rok"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
 publish.workspace = true

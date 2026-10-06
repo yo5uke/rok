@@ -378,6 +378,10 @@ fixes = { github = "yo5uke/fixes", track = true }
 pkgA = { github = "user/pkgA", branch = "dev" }
 pkgB = { github = "user/pkgB", tag = "v0.3.0" }
 pkgC = { github = "user/pkgC", rev = "a3f9c21" }
+
+# 取得元や環境変数と、範囲指定を組み合わせる（表の version）
+tidypolars = { repo = "multiverse", version = ">= 0.10" }
+arrow = { version = "< 20.0", env = { LIBARROW_BINARY = "true" } }
 ```
 
 - **取得元の明示**：CRAN 以外のリポジトリから取るパッケージは `repo` で取得元を固定する。同名のパッケージを意図しない取得元から取る事故を防ぐためである。
@@ -387,6 +391,7 @@ pkgC = { github = "user/pkgC", rev = "a3f9c21" }
   - 作り直したものは、リポジトリが配っていた tar.gz と同一とは限らない。ロックに「git から再構築」と記録し、実行時に表示する。ハッシュは、再構築した成果物のものを別に記録する
   - コミットが取得できない場合（強制プッシュ、削除など）は、失敗として明確に知らせる
 - **GitHub の指定**：uv にならい `branch`・`tag`・`rev` を使う。`track = true` は、ブランチを追う指定とだけ組み合わせられる。`add("user/pkg@ref")` の `@` 以降は、rok がタグ・ブランチ・コミットのどれかを判定して書き分ける。
+- **表の形での範囲指定**：`repo` や `env` と範囲指定を組み合わせるときは、表の `version` に書く。範囲指定だけのときは、これまでどおり文字列で書く（`fixest = "< 0.13"`）。
 - **ビルド時の環境変数**：ソースからビルドするときに効く環境変数を `env` で指定する。ビルド結果に影響するため、ロックにも記録する。polars の `NOT_CRAN = "true"` のような既知のものは、スキャナーの規則として提案する。
 
 ### 版の決め方

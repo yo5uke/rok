@@ -6,6 +6,8 @@ members = ["crates/core", "crates/rinstall", "crates/cli"]
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.95"
+license = "MIT"
+authors = ["Yosuke Abe"]
 publish = false
 
 [workspace.dependencies]

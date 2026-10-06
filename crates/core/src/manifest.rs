@@ -48,8 +48,11 @@ pub struct DependencySpec {
 pub enum DependencySource {
     /// CRAN through the P3M snapshot, with an optional version constraint.
     Cran { constraint: Constraint },
-    /// A CRAN-like repository declared in `[repositories]`.
-    Repository { alias: String },
+    /// A CRAN-like repository declared in `[repositories]`, with an optional version constraint.
+    Repository {
+        alias: String,
+        constraint: Constraint,
+    },
     /// A GitHub repository.
     GitHub {
         owner: String,
@@ -298,7 +301,9 @@ fn parse_dependency(
     check_keys(
         t,
         &format!("{key}."),
-        &["repo", "github", "branch", "tag", "rev", "track", "env"],
+        &[
+            "version", "repo", "github", "branch", "tag", "rev", "track", "env",
+        ],
     )?;
     let sub = |k: &str| format!("{key}.{k}");
 
@@ -315,6 +320,13 @@ fn parse_dependency(
         }
     }
 
+    let constraint = match optional_str(t, &sub("version"))? {
+        None => None,
+        Some(v) => Some(
+            v.parse::<Constraint>()
+                .map_err(|e| invalid(sub("version"), e.to_string()))?,
+        ),
+    };
     let repo = optional_str(t, &sub("repo"))?;
     let github = t
         .get("github")
@@ -341,21 +353,23 @@ fn parse_dependency(
         ),
     };
 
+    if github.is_none() && (branch.is_some() || tag.is_some() || rev.is_some() || track.is_some()) {
+        return Err(invalid(
+            key,
+            "`branch`, `tag`, `rev` and `track` can only be used with `github`",
+        ));
+    }
     let source = match (repo, github) {
         (Some(_), Some(_)) => return Err(invalid(key, "use either `repo` or `github`, not both")),
         (None, None) => {
-            return Err(invalid(
-                key,
-                "expected `repo` or `github` (or a version constraint string)",
-            ));
+            if constraint.is_none() && env.is_empty() {
+                return Err(invalid(key, "expected `version`, `repo` or `github`"));
+            }
+            DependencySource::Cran {
+                constraint: constraint.unwrap_or_default(),
+            }
         }
         (Some(alias), None) => {
-            if branch.is_some() || tag.is_some() || rev.is_some() || track.is_some() {
-                return Err(invalid(
-                    key,
-                    "`branch`, `tag`, `rev` and `track` can only be used with `github`",
-                ));
-            }
             if !repositories.contains_key(alias) {
                 return Err(invalid(
                     sub("repo"),
@@ -364,9 +378,16 @@ fn parse_dependency(
             }
             DependencySource::Repository {
                 alias: alias.to_string(),
+                constraint: constraint.unwrap_or_default(),
             }
         }
         (None, Some(gh)) => {
+            if constraint.is_some() {
+                return Err(invalid(
+                    sub("version"),
+                    "cannot be used with `github`; pin a version with `tag` or `rev`",
+                ));
+            }
             let (owner, repo) = parse_github(gh).ok_or_else(|| {
                 invalid(
                     sub("github"),
@@ -495,18 +516,24 @@ impl DependencySpec {
         }
     }
 
-    /// The TOML value written to `[dependencies]`: a constraint string, or an inline table.
+    /// The TOML value written to `[dependencies]`: a constraint string for a plain CRAN
+    /// dependency, otherwise an inline table. `version` is omitted when it allows any version.
     fn to_toml_value(&self) -> toml_edit::Value {
-        if let (DependencySource::Cran { constraint }, true) = (&self.source, self.env.is_empty()) {
-            return constraint.to_string().into();
-        }
         let mut t = toml_edit::InlineTable::new();
         match &self.source {
-            DependencySource::Cran { .. } => {
-                unreachable!("CRAN dependencies with `env` are not representable")
+            DependencySource::Cran { constraint } => {
+                if self.env.is_empty() {
+                    return constraint.to_string().into();
+                }
+                if !constraint.is_any() {
+                    t.insert("version", constraint.to_string().into());
+                }
             }
-            DependencySource::Repository { alias } => {
+            DependencySource::Repository { alias, constraint } => {
                 t.insert("repo", alias.as_str().into());
+                if !constraint.is_any() {
+                    t.insert("version", constraint.to_string().into());
+                }
             }
             DependencySource::GitHub {
                 owner,
@@ -561,9 +588,6 @@ impl ManifestDocument {
 
     /// Adds or replaces a dependency. A new one is appended at the end of `[dependencies]`;
     /// an existing one keeps its position.
-    ///
-    /// # Panics
-    /// If `spec` is a CRAN dependency with `env`, which the manifest syntax cannot express.
     pub fn set_dependency(&mut self, name: &str, spec: &DependencySpec) {
         let deps = self.doc.entry("dependencies").or_insert_with(|| {
             let mut t = toml_edit::Table::new();
@@ -649,6 +673,8 @@ coresynth = { github = "yo5uke/coresynth" }
 fixes = { github = "yo5uke/fixes", track = true }
 pkgB = { github = "user/pkgB", tag = "v0.3.0" }
 polars = { repo = "multiverse", env = { NOT_CRAN = "true" } }
+tidypolars = { repo = "multiverse", version = ">= 0.10" }
+arrow = { version = "< 20.0", env = { LIBARROW_BINARY = "true" } }
 
 [sync]
 on_startup = "ask"
@@ -680,7 +706,16 @@ suggest = ["officer", "flextable"]
         let names: Vec<_> = m.dependencies.iter().map(|(n, _)| n.as_str()).collect();
         assert_eq!(
             names,
-            ["fixest", "sf", "coresynth", "fixes", "pkgB", "polars"]
+            [
+                "fixest",
+                "sf",
+                "coresynth",
+                "fixes",
+                "pkgB",
+                "polars",
+                "tidypolars",
+                "arrow"
+            ]
         );
         assert!(
             matches!(&m.dependency("fixest").unwrap().source, DependencySource::Cran { constraint } if constraint.to_string() == "< 0.13")
@@ -700,9 +735,20 @@ suggest = ["officer", "flextable"]
         assert_eq!(
             polars.source,
             DependencySource::Repository {
-                alias: "multiverse".into()
+                alias: "multiverse".into(),
+                constraint: Constraint::any()
             }
         );
+        assert!(matches!(
+            &m.dependency("tidypolars").unwrap().source,
+            DependencySource::Repository { constraint, .. } if constraint.to_string() == ">= 0.10"
+        ));
+        let arrow = m.dependency("arrow").unwrap();
+        assert!(matches!(
+            &arrow.source,
+            DependencySource::Cran { constraint } if constraint.to_string() == "< 20.0"
+        ));
+        assert_eq!(arrow.env["LIBARROW_BINARY"], "true");
         assert_eq!(polars.env.get("NOT_CRAN").map(String::as_str), Some("true"));
         assert_eq!(
             m.repositories["multiverse"],
@@ -751,7 +797,14 @@ suggest = ["officer", "flextable"]
         assert!(
             err("x = { repo = \"mv\", github = \"a/b\" }").contains("either `repo` or `github`")
         );
-        assert!(err("x = { env = { A = \"1\" } }").contains("expected `repo` or `github`"));
+        assert!(err("x = { }").contains("expected `version`, `repo` or `github`"));
+        assert!(
+            err("x = { version = \"1.0\", github = \"a/b\" }")
+                .contains("pin a version with `tag` or `rev`")
+        );
+        assert!(err("x = { branch = \"dev\" }").contains("only be used with `github`"));
+        assert!(err("x = { version = \"> one\" }").contains("`dependencies.x.version`"));
+        assert!(Manifest::parse(&with_deps("x = { env = { A = \"1\" } }")).is_ok());
         assert!(err("x = { repo = \"nope\" }").contains("not declared in [repositories]"));
         assert!(
             err("x = { repo = \"mv\", branch = \"dev\" }").contains("only be used with `github`")
@@ -798,7 +851,7 @@ suggest = ["officer", "flextable"]
         // The result is still a valid manifest.
         let m = Manifest::parse(&out).unwrap();
         assert_eq!(m.project.snapshot, "2027-01-31");
-        assert_eq!(m.dependencies.len(), 6);
+        assert_eq!(m.dependencies.len(), 8);
     }
 
     #[test]
@@ -821,6 +874,35 @@ suggest = ["officer", "flextable"]
         assert!(out.contains("pkgA = { github = \"user/pkgA\", branch = \"dev\", track = true }"));
         assert!(out.contains("r = \"4.5\""));
         assert!(Manifest::parse(&out).is_ok());
+    }
+
+    #[test]
+    fn writes_version_tables() {
+        let (mut doc, _) = ManifestDocument::parse(&with_deps("")).unwrap();
+        doc.set_dependency(
+            "tidypolars",
+            &DependencySpec {
+                source: DependencySource::Repository {
+                    alias: "mv".into(),
+                    constraint: ">= 0.10".parse().unwrap(),
+                },
+                env: BTreeMap::new(),
+            },
+        );
+        doc.set_dependency(
+            "arrow",
+            &DependencySpec {
+                source: DependencySource::Cran {
+                    constraint: Constraint::any(),
+                },
+                env: BTreeMap::from([("LIBARROW_BINARY".into(), "true".into())]),
+            },
+        );
+        let out = doc.to_string();
+        assert!(out.contains("tidypolars = { repo = \"mv\", version = \">= 0.10\" }"));
+        assert!(out.contains("arrow = { env = { LIBARROW_BINARY = \"true\" } }"));
+        let m = Manifest::parse(&out).unwrap();
+        assert_eq!(m.dependency("arrow").unwrap().env.len(), 1);
     }
 
     #[test]
