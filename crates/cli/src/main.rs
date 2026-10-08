@@ -2,6 +2,7 @@
 
 mod activate;
 mod commands;
+mod import;
 mod rcmd;
 mod ui;
 
@@ -109,6 +110,16 @@ enum Command {
         #[arg(long, value_enum)]
         choice: Option<activate::SyncChoice>,
     },
+    /// Migrate a project from another tool, keeping its package versions.
+    Import {
+        #[command(subcommand)]
+        from: ImportCommand,
+    },
+    /// Write another tool's lockfile from rok.lock.
+    Export {
+        #[command(subcommand)]
+        to: ExportCommand,
+    },
     /// Manage R itself: list, install, uninstall, and the project's R version.
     R {
         #[command(subcommand)]
@@ -136,6 +147,29 @@ enum Command {
         /// How many levels to show.
         #[arg(long, value_name = "N")]
         depth: Option<usize>,
+    },
+}
+
+#[derive(Subcommand)]
+enum ImportCommand {
+    /// Create rok.toml and rok.lock from renv.lock, with the same versions.
+    Renv {
+        /// The renv.lock to read (default: the one in the project directory).
+        #[arg(long, value_name = "FILE")]
+        file: Option<PathBuf>,
+        /// What to do with packages from sources rok cannot install yet (asked if not given).
+        #[arg(long, value_enum)]
+        unsupported: Option<import::Unsupported>,
+    },
+}
+
+#[derive(Subcommand)]
+enum ExportCommand {
+    /// Write renv.lock (without Hash), with P3M's dated repositories.
+    Renv {
+        /// Where to write it (default: renv.lock in the project).
+        #[arg(long, value_name = "FILE")]
+        output: Option<PathBuf>,
     },
 }
 
@@ -204,6 +238,12 @@ fn main() -> ExitCode {
             Ok(code) => return code,
             Err(e) => Err(e),
         },
+        Command::Import {
+            from: ImportCommand::Renv { file, unsupported },
+        } => import::import_renv(&ui, project, file, unsupported),
+        Command::Export {
+            to: ExportCommand::Renv { output },
+        } => import::export_renv(&ui, project, output),
         Command::R { command } => match command {
             RCommand::List { all } => rcmd::list(&ui, project, all),
             RCommand::Install { version, system } => rcmd::install(&ui, project, version, system),

@@ -273,6 +273,16 @@ pub fn init(
         bail!("Cancelled. Nothing was changed.");
     }
 
+    // A renv project: offer to migrate it instead (requirements chapter 5).
+    if dir.join(rok_core::renv::FILE_NAME).is_file()
+        && ui.confirm(
+            "import-renv",
+            "This folder has renv.lock. Migrate it to rok, keeping the same package versions?",
+            true,
+        )?
+    {
+        return crate::import::import_renv(ui, Some(&dir), None, None);
+    }
     let env = Env::from_env()?;
     let installs = env.r_installations();
     let r = init_r(ui, &env, &installs, r.as_deref())?;
@@ -1036,6 +1046,14 @@ fn github_notices(
 pub fn undo(ui: &Ui, project_dir: Option<&Path>) -> anyhow::Result<()> {
     let start = Instant::now();
     let project = find_project(project_dir)?;
+    if project.imported_from_renv() {
+        project.undo_import()?;
+        ui.success(
+            "Undid the migration from renv: rok.toml and rok.lock were removed, and .Rprofile starts renv again.",
+        );
+        ui.result(json!({ "command": "undo", "undid": "import renv" }));
+        return Ok(());
+    }
     let Some((manifest_text, Some(saved_lock))) = project.read_undo()? else {
         bail!("Nothing to undo.");
     };
@@ -1202,7 +1220,7 @@ pub fn status(ui: &Ui, project_dir: Option<&Path>, packages: bool) -> anyhow::Re
 
 // ---- why and tree ----
 
-fn lock_or_fail(project: &Project) -> anyhow::Result<Lockfile> {
+pub(crate) fn lock_or_fail(project: &Project) -> anyhow::Result<Lockfile> {
     project
         .read_lock()?
         .ok_or_else(|| anyhow::anyhow!("rok.lock is missing; run `rok sync` first."))

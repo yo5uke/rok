@@ -335,3 +335,58 @@ pass_through <- function(call, env, name, fallback, first = NULL) {
   }
   eval(call, env)
 }
+
+#' Migrate a project from renv
+#'
+#' Creates `rok.toml` and `rok.lock` from `renv.lock`, with exactly the same package versions
+#' (CRAN versions from the snapshot dates they were current, GitHub packages at the same
+#' commits). The packages to declare are the ones no other package needs and the ones the code
+#' uses; you are asked before anything is written. `renv.lock` and `renv/` are left as they
+#' are, and [undo()] reverts the migration.
+#'
+#' @param file The renv lockfile (default: `renv.lock` in the project).
+#' @param unsupported What to do with packages from sources rok cannot install yet (such as
+#'   Bioconductor): `"unmanaged"` keeps them as unmanaged packages, `"abort"` stops (asked if
+#'   not given).
+#' @inheritParams add
+#' @returns The result, invisibly.
+#' @export
+#' @examplesIf interactive() && rok_available()
+#' dir <- tempfile("from-renv")
+#' dir.create(dir)
+#' writeLines(c(
+#'   '{"R": {"Version": "4.6.1", "Repositories": []},',
+#'   ' "Packages": {"R6": {"Package": "R6", "Version": "2.6.1", "Source": "Repository"}}}'
+#' ), file.path(dir, "renv.lock"))
+#' import_renv(project = dir)
+import_renv <- function(file = NULL, unsupported = NULL, project = ".") {
+  invisible(rok_call(c(
+    project_arg(project), "import", "renv",
+    opt("--file", if (!is.null(file)) path.expand(file)),
+    opt("--unsupported", unsupported)
+  )))
+}
+
+#' Write renv.lock from rok.lock
+#'
+#' Writes a minimal `renv.lock` (without `Hash`) that `renv::restore()` can use: each package
+#' names the dated Posit Package Manager snapshot it comes from, and GitHub packages their
+#' commit. Unmanaged packages are left out. To write it every time `rok.lock` changes, add
+#' `[export]` with `renv = true` to `rok.toml`.
+#'
+#' @param path Where to write it (default: `renv.lock` in the project, after asking if it
+#'   exists).
+#' @inheritParams add
+#' @returns The result, invisibly.
+#' @export
+#' @examplesIf interactive() && rok_available()
+#' dir <- tempfile("my-analysis")
+#' init(dir)
+#' add("R6", project = dir)
+#' export_renv(file.path(tempdir(), "renv.lock"), project = dir)
+export_renv <- function(path = NULL, project = ".") {
+  invisible(rok_call(c(
+    project_arg(project), "export", "renv",
+    opt("--output", if (!is.null(path)) path.expand(path))
+  )))
+}

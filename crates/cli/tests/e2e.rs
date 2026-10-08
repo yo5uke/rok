@@ -318,3 +318,80 @@ fn scans_the_code_for_packages() {
             .contains("R6")
     );
 }
+
+#[test]
+#[ignore = "needs the network and R"]
+fn migrates_from_renv_and_back() {
+    let t = tempfile::tempdir().unwrap();
+    let home = t.path();
+    let proj = home.join("proj");
+    std::fs::create_dir_all(&proj).unwrap();
+    std::fs::write(
+        proj.join("renv.lock"),
+        r#"{
+  "R": { "Version": "4.6.1", "Repositories": [ { "Name": "CRAN", "URL": "https://cloud.r-project.org" } ] },
+  "Packages": {
+    "R6": { "Package": "R6", "Version": "2.6.1", "Source": "Repository", "Repository": "CRAN" },
+    "praise": { "Package": "praise", "Version": "1.0.0", "Source": "GitHub", "RemoteUsername": "gaborcsardi",
+      "RemoteRepo": "praise", "RemoteRef": "HEAD", "RemoteSha": "094469afaf033af00aeb46527970f1db22f4d49d" },
+    "limma": { "Package": "limma", "Version": "3.60.0", "Source": "Bioconductor" },
+    "renv": { "Package": "renv", "Version": "1.0.7", "Source": "Repository", "Repository": "CRAN" }
+  }
+}"#,
+    )
+    .unwrap();
+    std::fs::write(proj.join(".Rprofile"), "source(\"renv/activate.R\")\n").unwrap();
+
+    // Bioconductor needs an answer; with it, the same versions, the GitHub commit, and limma
+    // left to the user.
+    let asked = rok(&proj, &["import", "renv", "--json", "--yes"]);
+    assert!(
+        asked.status.success(),
+        "{}",
+        String::from_utf8_lossy(&asked.stderr)
+    );
+    let lock = std::fs::read_to_string(proj.join("rok.lock")).unwrap();
+    assert!(
+        lock.contains("name = \"R6\"\nversion = \"2.6.1\""),
+        "{lock}"
+    );
+    assert!(lock.contains("commit = \"094469afaf033af00aeb46527970f1db22f4d49d\""));
+    let manifest = std::fs::read_to_string(proj.join("rok.toml")).unwrap();
+    assert!(
+        manifest.contains("[unmanaged]\npackages = [\"limma\"]"),
+        "{manifest}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(proj.join(".Rprofile")).unwrap(),
+        "source(\".rok/activate.R\")\n"
+    );
+
+    // And back: renv.lock from rok.lock, without Hash.
+    let out = home.join("exported.lock");
+    json(&rok(
+        &proj,
+        &[
+            "export",
+            "renv",
+            "--output",
+            out.to_str().unwrap(),
+            "--json",
+        ],
+    ));
+    let exported: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&out).unwrap()).unwrap();
+    assert_eq!(exported["Packages"]["R6"]["Version"], "2.6.1");
+    assert!(exported["Packages"]["R6"].get("Hash").is_none());
+    assert_eq!(
+        exported["Packages"]["praise"]["RemoteSha"],
+        "094469afaf033af00aeb46527970f1db22f4d49d"
+    );
+
+    // undo reverts the migration.
+    json(&rok(&proj, &["undo", "--json"]));
+    assert!(!proj.join("rok.toml").exists() && !proj.join("rok.lock").exists());
+    assert_eq!(
+        std::fs::read_to_string(proj.join(".Rprofile")).unwrap(),
+        "source(\"renv/activate.R\")\n"
+    );
+}

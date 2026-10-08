@@ -38,6 +38,9 @@ fn io_err(path: &Path) -> impl FnOnce(std::io::Error) -> ProjectError + '_ {
     }
 }
 
+/// The file in `.rok/undo/` that marks a migration from renv as the change to undo.
+const IMPORT_MARK: &str = "import-from-renv";
+
 /// The line `.Rprofile` uses to run the startup hook.
 pub const RPROFILE_LINE: &str = "source(\".rok/activate.R\")";
 
@@ -205,6 +208,8 @@ impl Project {
     /// `.rok/undo/` (one generation) so the change can be undone.
     pub fn save(&self, manifest: &str, lock: &Lockfile, backup: bool) -> Result<(), ProjectError> {
         if backup {
+            // This change is now the one undo reverts, not a migration from renv before it.
+            let _ = std::fs::remove_file(self.undo_dir().join(IMPORT_MARK));
             let undo = self.undo_dir();
             for (from, name) in [
                 (self.manifest_path(), manifest::FILE_NAME),
@@ -222,7 +227,17 @@ impl Project {
         }
         let (m, l) = (self.manifest_path(), self.lock_path());
         write_atomic(&m, manifest.as_bytes()).map_err(io_err(&m))?;
-        write_atomic(&l, lock.to_toml_string().as_bytes()).map_err(io_err(&l))
+        write_atomic(&l, lock.to_toml_string().as_bytes()).map_err(io_err(&l))?;
+        self.export_renv_if_asked(manifest, lock)
+    }
+
+    /// Writes renv.lock beside rok.lock when rok.toml asks for it (`[export] renv = true`).
+    fn export_renv_if_asked(&self, manifest: &str, lock: &Lockfile) -> Result<(), ProjectError> {
+        if Manifest::parse(manifest).is_ok_and(|m| m.export_renv) {
+            let p = self.root.join(crate::renv::FILE_NAME);
+            write_atomic(&p, crate::renv::export(lock).as_bytes()).map_err(io_err(&p))?;
+        }
+        Ok(())
     }
 
     /// The manifest text and lockfile saved before the last change, if any.
@@ -258,7 +273,74 @@ impl Project {
     /// Writes the lockfile only.
     pub fn save_lock(&self, lock: &Lockfile) -> Result<(), ProjectError> {
         let l = self.lock_path();
-        write_atomic(&l, lock.to_toml_string().as_bytes()).map_err(io_err(&l))
+        write_atomic(&l, lock.to_toml_string().as_bytes()).map_err(io_err(&l))?;
+        let manifest = std::fs::read_to_string(self.manifest_path()).unwrap_or_default();
+        self.export_renv_if_asked(&manifest, lock)
+    }
+
+    /// After a migration from renv: makes `.Rprofile` run rok's hook instead of renv's (only
+    /// that line changes; without one, rok's is added first), and remembers the old `.Rprofile`
+    /// so that undo can revert the migration.
+    pub fn take_over_from_renv(&self) -> Result<(), ProjectError> {
+        self.refresh_activate()?;
+        let rprofile = self.root.join(".Rprofile");
+        let old = match std::fs::read_to_string(&rprofile) {
+            Ok(t) => Some(t),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => return Err(io_err(&rprofile)(e)),
+        };
+        let renv_line = |l: &str| {
+            let t = l.trim().replace('\'', "\"");
+            t == "source(\"renv/activate.R\")"
+        };
+        let new = match &old {
+            Some(t) if t.lines().any(renv_line) => {
+                t.lines()
+                    .map(|l| if renv_line(l) { RPROFILE_LINE } else { l })
+                    .collect::<Vec<_>>()
+                    .join("\n")
+                    + "\n"
+            }
+            Some(t) if t.lines().any(|l| l.trim() == RPROFILE_LINE) => t.clone(),
+            Some(t) => format!("{RPROFILE_LINE}\n{t}"),
+            None => format!("{RPROFILE_LINE}\n"),
+        };
+        write_atomic(&rprofile, new.as_bytes()).map_err(io_err(&rprofile))?;
+        // What undo needs: whether .Rprofile existed, and its text.
+        let mark = self.undo_dir().join(IMPORT_MARK);
+        let saved = match &old {
+            Some(t) => format!("present\n{t}"),
+            None => "absent\n".to_string(),
+        };
+        write_atomic(&mark, saved.as_bytes()).map_err(io_err(&mark))
+    }
+
+    /// Whether the last change was a migration from renv.
+    pub fn imported_from_renv(&self) -> bool {
+        self.undo_dir().join(IMPORT_MARK).is_file()
+    }
+
+    /// Reverts a migration from renv: restores `.Rprofile` and removes rok.toml and rok.lock.
+    /// The library under `.rok/` stays (it is only links into the cache).
+    pub fn undo_import(&self) -> Result<(), ProjectError> {
+        let mark = self.undo_dir().join(IMPORT_MARK);
+        let saved = std::fs::read_to_string(&mark).map_err(io_err(&mark))?;
+        let rprofile = self.root.join(".Rprofile");
+        match saved.split_once('\n') {
+            Some(("present", text)) => {
+                write_atomic(&rprofile, text.as_bytes()).map_err(io_err(&rprofile))?
+            }
+            _ => {
+                let _ = std::fs::remove_file(&rprofile);
+            }
+        }
+        for p in [self.manifest_path(), self.lock_path(), mark] {
+            match std::fs::remove_file(&p) {
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(io_err(&p)(e)),
+                _ => {}
+            }
+        }
+        self.clear_undo()
     }
 
     /// Rewrites `.rok/activate.R` and `.rok/.gitignore` if they differ from this version of

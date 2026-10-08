@@ -37,6 +37,8 @@ pub struct Manifest {
     pub sync: SyncSettings,
     pub unmanaged: Vec<String>,
     pub scan_rules: Vec<ScanRule>,
+    /// Write renv.lock whenever rok.lock changes (`[export] renv = true`).
+    pub export_renv: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -142,6 +144,7 @@ impl Manifest {
                 "sync",
                 "unmanaged",
                 "scan",
+                "export",
             ],
         )?;
 
@@ -280,6 +283,16 @@ impl Manifest {
             }
         }
 
+        let mut export_renv = false;
+        if let Some(t) = table(&doc, "export")? {
+            check_keys(t, "export.", &["renv"])?;
+            if let Some(v) = t.get("renv") {
+                export_renv = v
+                    .as_bool()
+                    .ok_or_else(|| invalid("export.renv", "expected true or false"))?;
+            }
+        }
+
         Ok(Manifest {
             project: Project {
                 name: name.to_string(),
@@ -291,6 +304,7 @@ impl Manifest {
             sync,
             unmanaged,
             scan_rules,
+            export_renv,
         })
     }
 
@@ -613,6 +627,33 @@ impl ManifestDocument {
             .and_then(|d| d.as_table_like_mut())
             .and_then(|t| t.remove(name))
             .is_some()
+    }
+
+    /// Adds or replaces a CRAN-like repository in `[repositories]`.
+    pub fn set_repository(&mut self, alias: &str, url: &str) {
+        let repos = self.doc.entry("repositories").or_insert_with(|| {
+            let mut t = toml_edit::Table::new();
+            t.set_implicit(false);
+            toml_edit::Item::Table(t)
+        });
+        if let Some(t) = repos.as_table_like_mut() {
+            t.insert(alias, toml_edit::value(url));
+        }
+    }
+
+    /// Sets `[unmanaged] packages` (removes the table when `names` is empty).
+    pub fn set_unmanaged(&mut self, names: &[String]) {
+        if names.is_empty() {
+            self.doc.remove("unmanaged");
+            return;
+        }
+        let mut list = toml_edit::Array::new();
+        for n in names {
+            list.push(n.as_str());
+        }
+        let mut t = toml_edit::Table::new();
+        t["packages"] = toml_edit::value(list);
+        self.doc["unmanaged"] = toml_edit::Item::Table(t);
     }
 
     pub fn set_snapshot(&mut self, date: &str) {
