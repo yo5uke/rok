@@ -16,7 +16,7 @@ DATE=${DATE:-2026-10-01}
 now() { python3 -c 'import time; print(time.monotonic())'; }
 since() { python3 -c "import sys,time; print(round(time.monotonic() - float(sys.argv[1]), 1))" "$1"; }
 
-echo "## 環境：macOS $(sw_vers -productVersion)、$arch、Xcode のコマンドラインツール：$(xcode-select -p 2>/dev/null || echo なし)"
+echo "## 環境：macOS $(sw_vers -productVersion)、${arch}、Xcode のコマンドラインツール：$(xcode-select -p 2>/dev/null || echo なし)"
 
 echo "## A. 提供されている版（versions.json の各版に HEAD）"
 versions=$(curl -fsS https://cdn.posit.co/r/versions.json | python3 -c 'import json,sys; print(" ".join(json.load(sys.stdin)["r_versions"]))')
@@ -34,14 +34,14 @@ for v in $VERSIONS; do
   curl -fsSL -o "out/R-$v.tar.gz" "$base/R-$v$suffix.tar.gz"
   dl=$(since "$t"); t=$(now)
   tar -xzf "out/R-$v.tar.gz" -C out/R
-  echo "R $v：取得 $(du -m "out/R-$v.tar.gz" | cut -f1) MB を ${dl} 秒、展開 $(since "$t") 秒、展開後 $(du -sm "out/R/R-$v" | cut -f1) MB"
+  echo "R ${v}：取得 $(du -m "out/R-$v.tar.gz" | cut -f1) MB を ${dl} 秒、展開 $(since "$t") 秒、展開後 $(du -sm "out/R/R-$v" | cut -f1) MB"
   echo "  隔離の属性（com.apple.quarantine）：$(xattr -r out/R/R-$v 2>/dev/null | grep -c quarantine || true) 件"
 done
 echo "  構成：$(ls out/R/R-${VERSIONS%% *} | tr '\n' ' ')"
 
 for v in $VERSIONS; do
   rs=$OUT/R/R-$v/bin/Rscript
-  echo "## C. R $v：起動、HTTPS、P3M のバイナリ、ソースからのビルド"
+  echo "## C. R ${v}：起動、HTTPS、P3M のバイナリ、ソースからのビルド"
   "$rs" -e "cat(R.version.string, '\nR.home():', R.home(), '\n')"
   "$rs" ../v05-windows-r-install/check.R "$OUT/lib-$v" "$DATE" 2>&1 | grep -v -E '^\s*$|^Attaching|masked|%notin%'
   echo "  Gatekeeper（spctl）：$(spctl --assess --type execute "$OUT/R/R-$v/bin/exec/R" 2>&1 | head -1 || true)"

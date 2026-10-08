@@ -15,7 +15,7 @@ minor=$("$rs" windows-minor.R)
 macos=$(curl -fsS https://packagemanager.posit.co/__api__/status |
   python3 -c "import json,sys; d=json.load(sys.stdin)['macos_urls']; a='arm64' if '$(uname -m)'=='arm64' else 'x86_64'; print((d.get('$minor') or d['default'])[a])")
 repo=https://packagemanager.posit.co/cran/$DATE/bin/macosx/$macos/contrib/$minor
-echo "## R: $RHOME（R $minor）、P3M: $repo"
+echo "## R: ${RHOME}（R ${minor}）、P3M: $repo"
 
 "$rs" windows-deps.R "$repo" "$OUT/packages.csv" sf data.table R6 cli
 n=$(($(wc -l < "$OUT/packages.csv") - 1))
@@ -48,8 +48,8 @@ for name in R6 data.table sf; do
   ver=$(grep "^\"$name\"," "$OUT/packages.csv" | cut -d, -f2 | tr -d '"')
   "$RHOME/bin/R" CMD INSTALL --library="$OUT/lib-r" "$OUT/tgz/${name}_${ver}.tgz" > "$OUT/install-$name.log" 2>&1
   if diff -r "$OUT/lib/$name" "$OUT/lib-r/$name" > "$OUT/diff-$name.txt"; then
-    echo "$name：同一（$(find "$OUT/lib/$name" -type f | wc -l | tr -d ' ') ファイル）"
+    echo "${name}：同一（$(find "$OUT/lib/$name" -type f | wc -l | tr -d ' ') ファイル）"
   else
-    echo "$name：違いあり"; head -5 "$OUT/diff-$name.txt"
+    echo "${name}：違いあり"; head -5 "$OUT/diff-$name.txt"
   fi
 done
