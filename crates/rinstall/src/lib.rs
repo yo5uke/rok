@@ -232,6 +232,13 @@ pub fn builds(
                 url: format!("{BUILDS_URL}/windows/R-{version}-windows.zip"),
             }]);
         }
+        (Os::MacOs, arch) => {
+            let arm = if arch == Arch::Aarch64 { "-arm64" } else { "" };
+            return Ok(vec![Build {
+                kind: BuildKind::Portable,
+                url: format!("{BUILDS_URL}/macos/R-{version}-macos{arm}.tar.gz"),
+            }]);
+        }
         _ => return Err(RInstallError::Unsupported(platform.to_string())),
     }
     let arm = if platform.arch == Arch::Aarch64 {
@@ -327,22 +334,40 @@ pub fn is_managed(dirs: &UserDirs, version: &Version) -> bool {
 /// CRAN's installers of past R releases for Windows.
 pub const WINDOWS_OLD_RELEASES: &str = "https://cloud.r-project.org/bin/windows/base/old/";
 
-/// Where to get R `version` by hand on Windows when Posit has no portable build of it.
-fn windows_installer_advice(version: &Version) -> String {
-    format!(
-        "  • Install it with CRAN's installer from {WINDOWS_OLD_RELEASES}{version}/; rok then finds it"
-    )
+/// CRAN's installers of R releases for macOS.
+pub const MACOS_RELEASES: &str = "https://cloud.r-project.org/bin/macosx/";
+
+/// Where to get R `version` by hand when Posit has no portable build of it.
+fn installer_advice(os: Os, version: &Version) -> String {
+    match os {
+        Os::MacOs => format!(
+            "  • Install it with CRAN's installer from {MACOS_RELEASES} (older releases are linked there); rok then finds it"
+        ),
+        _ => format!(
+            "  • Install it with CRAN's installer from {WINDOWS_OLD_RELEASES}{version}/; rok then finds it"
+        ),
+    }
 }
 
-/// Whether Posit builds R `version` for this machine. On Windows, only R 3.6.3 and 4.1.0 or
-/// later have portable builds (V5); elsewhere the release list does not tell, so all count.
+/// Where to find R installers by hand on Windows or macOS.
+pub fn installers_url(os: Os) -> &'static str {
+    if os == Os::MacOs {
+        MACOS_RELEASES
+    } else {
+        WINDOWS_OLD_RELEASES
+    }
+}
+
+/// Whether Posit builds R `version` for this machine. Portable builds exist for R 3.6.3 and
+/// 4.1.0 or later on Windows (V5), and 4.1.0 or later on macOS (V6); on Linux the release
+/// list does not tell, so all count.
 pub fn is_built_for(platform: &Platform, version: &Version) -> bool {
+    let part = |i: usize| version.parts().get(i).copied().unwrap_or(0);
+    let from_4_1 = (part(0), part(1)) >= (4, 1);
     match platform.os {
-        Os::Windows => {
-            let part = |i: usize| version.parts().get(i).copied().unwrap_or(0);
-            version.as_str() == "3.6.3" || (part(0), part(1)) >= (4, 1)
-        }
-        _ => true,
+        Os::Windows => version.as_str() == "3.6.3" || from_4_1,
+        Os::MacOs => from_4_1,
+        Os::Linux => true,
     }
 }
 
@@ -374,8 +399,8 @@ pub fn install(
         }
     }
     let Some(build) = chosen else {
-        if platform.os == Os::Windows {
-            reasons.push(windows_installer_advice(version));
+        if platform.os != Os::Linux {
+            reasons.push(installer_advice(platform.os, version));
         } else if reasons.is_empty() {
             reasons
                 .push("  • no Posit build fits this Linux distribution and C library".to_string());
@@ -430,10 +455,13 @@ pub fn install_build(
             .unpack(&unpack)
             .map_err(io_err(&unpack))?;
     }
-    // Windows builds unpack to `R-<version>/` with R_HOME at the top, others to `<version>/`
-    // with R_HOME at `lib/R`.
+    // Windows and macOS builds unpack to `R-<version>/` with R_HOME at the top; Linux builds
+    // to `<version>/` with R_HOME at `lib/R`.
+    let macos = build.url.contains("/macos/");
     let (top, exe) = if zip {
         (unpack.join(format!("R-{version}")), "bin/R.exe")
+    } else if macos {
+        (unpack.join(format!("R-{version}")), "bin/R")
     } else {
         (unpack.join(version.as_str()), "bin/R")
     };
@@ -446,14 +474,14 @@ pub fn install_build(
     if let BuildKind::Distribution(_) = &build.kind {
         relocate(&top, &format!("/opt/R/{version}"), &target)?;
     }
-    if cfg!(windows) {
+    if zip || macos {
         let mark = top.join(rdetect::MANAGED_MARK);
         std::fs::write(&mark, format!("Installed by rok from {}\n", build.url))
             .map_err(io_err(&mark))?;
     }
     std::fs::rename(&top, &target).map_err(io_err(&target))?;
 
-    let r_home = if zip {
+    let r_home = if zip || macos {
         target.clone()
     } else {
         target.join("lib").join("R")
@@ -629,7 +657,25 @@ mod tests {
             ..windows.clone()
         };
         assert!(builds(&arm, None, &v("4.5.3")).is_err());
-        assert!(windows_installer_advice(&v("4.0.5")).contains("/base/old/4.0.5/"));
+        assert!(installer_advice(Os::Windows, &v("4.0.5")).contains("/base/old/4.0.5/"));
+        let mac = Platform {
+            os: Os::MacOs,
+            arch: Arch::Aarch64,
+            distro: None,
+        };
+        assert_eq!(
+            builds(&mac, None, &v("4.5.3")).unwrap()[0].url,
+            "https://cdn.posit.co/r/macos/R-4.5.3-macos-arm64.tar.gz"
+        );
+        let intel = Platform {
+            arch: Arch::X86_64,
+            ..mac.clone()
+        };
+        assert_eq!(
+            builds(&intel, None, &v("4.5.3")).unwrap()[0].url,
+            "https://cdn.posit.co/r/macos/R-4.5.3-macos.tar.gz"
+        );
+        assert!(!is_built_for(&mac, &v("4.0.5")) && is_built_for(&mac, &v("4.1.0")));
         for (version, built) in [
             ("4.6.1", true),
             ("4.1.0", true),
@@ -663,6 +709,35 @@ mod tests {
             system_install_commands(&rhel, &v("4.6.1")).unwrap(),
             ["sudo dnf install -y https://cdn.posit.co/r/rhel-9/pkgs/R-4.6.1-1-1.x86_64.rpm"]
         );
+    }
+
+    /// Posit's portable build for this machine, installed for real into a temporary place:
+    /// it must start and report its version (V1b, V5, V6).
+    #[test]
+    #[ignore = "downloads R (about 100 MB)"]
+    fn installs_the_portable_build() {
+        let platform = Platform::detect();
+        let t = tempfile::tempdir().unwrap();
+        let dirs = UserDirs::under(t.path());
+        let version = v("4.5.3");
+        let installed = install(&Http::new(), &dirs, &platform, &version, &|_| {}).unwrap();
+        assert_eq!(installed.build, BuildKind::Portable);
+        let r = installed.installation;
+        assert!(is_managed(&dirs, &version));
+        let found = rdetect::find_installations(&dirs, None);
+        assert!(
+            found
+                .iter()
+                .any(|i| i.version == version && i.kind == RKind::Managed),
+            "{found:?}"
+        );
+        let out = Command::new(r.rscript())
+            .args(["-e", "cat(as.character(getRversion()))"])
+            .output()
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "4.5.3");
+        uninstall(&dirs, &version).unwrap();
+        assert!(!install_dir(&dirs, &version).exists());
     }
 
     /// The fallback for old glibc, tried for real: the distribution build, relocated.

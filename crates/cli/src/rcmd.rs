@@ -176,10 +176,10 @@ pub fn list(ui: &Ui, project_dir: Option<&Path>, all: bool) -> anyhow::Result<()
                 .join(", ")
         ));
     }
-    if env.platform.os == rok_core::platform::Os::Windows {
+    if env.platform.os != rok_core::platform::Os::Linux {
         ui.info(&format!(
             "Older versions have no build rok can install; install them with CRAN's installer ({}), and rok finds them.",
-            rinstall::WINDOWS_OLD_RELEASES
+            rinstall::installers_url(env.platform.os)
         ));
     }
     ui.result(json!({

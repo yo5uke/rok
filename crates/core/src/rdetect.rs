@@ -18,12 +18,12 @@ pub enum RKind {
     Managed,
     /// Found on `PATH`.
     Path,
-    /// A conventional location such as `/opt/R/<version>`, `/usr/lib/R` or, on Windows,
-    /// `%ProgramFiles%/R/R-<version>`.
+    /// A conventional location such as `/opt/R/<version>`, `/usr/lib/R`, on Windows
+    /// `%ProgramFiles%/R/R-<version>`, or on macOS `/Library/Frameworks/R.framework`.
     System,
 }
 
-/// The file rok puts in each R it installs on Windows, where its directory
+/// The file rok puts in each R it installs on Windows and macOS. On Windows, its directory
 /// (`%LOCALAPPDATA%/Programs/R`) also holds R installed by CRAN's installer.
 pub const MANAGED_MARK: &str = ".rok-installed";
 
@@ -142,6 +142,19 @@ pub fn find_installations(dirs: &UserDirs, path_var: Option<OsString>) -> Vec<RI
             found.extend(dirs.into_iter().map(|p| (p, RKind::System)));
         }
     } else {
+        // CRAN's installer for macOS: one framework with a directory per version.
+        if cfg!(target_os = "macos") {
+            let mut versions: Vec<PathBuf> =
+                std::fs::read_dir("/Library/Frameworks/R.framework/Versions")
+                    .into_iter()
+                    .flatten()
+                    .flatten()
+                    .filter(|e| e.file_name() != "Current")
+                    .map(|e| e.path().join("Resources/bin/R"))
+                    .collect();
+            versions.sort();
+            found.extend(versions.into_iter().map(|p| (p, RKind::System)));
+        }
         let mut opt: Vec<PathBuf> = std::fs::read_dir("/opt/R")
             .into_iter()
             .flatten()

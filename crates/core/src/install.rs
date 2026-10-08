@@ -174,12 +174,14 @@ fn short_hash(s: &str) -> String {
 
 impl Context<'_> {
     /// The cache key of P3M binaries for this R and platform (`4.6-noble`, `4.6-noble-arm64`,
-    /// `4.6-win`), matching P3M's `x-package-binary-tag`. `None` when P3M has no binaries for
-    /// this machine.
+    /// `4.6-win`, `4.6-macos-arm64`, `4.6-macos`), matching P3M's `x-package-binary-tag`.
+    /// `None` when P3M has no binaries for this machine.
     pub fn binary_key(&self) -> Option<String> {
         let minor = self.r.version.minor();
         match (self.platform.os, self.platform.arch) {
             (Os::Windows, Arch::X86_64) => Some(format!("{minor}-win")),
+            (Os::MacOs, Arch::Aarch64) => Some(format!("{minor}-macos-arm64")),
+            (Os::MacOs, Arch::X86_64) => Some(format!("{minor}-macos")),
             (Os::Linux, arch) => {
                 let distro = self.platform.p3m_linux_name()?;
                 let arm = if arch == Arch::Aarch64 { "-arm64" } else { "" };
@@ -261,24 +263,35 @@ impl Context<'_> {
             })
     }
 
+    /// The snapshot date of a CRAN package that is not in the cache yet.
+    fn uncached_date<'w>(&self, w: &'w Wanted) -> Option<&'w str> {
+        match &w.origin {
+            Origin::Snapshot(date) if self.cached(w).is_none() => Some(date.as_str()),
+            _ => None,
+        }
+    }
+
     /// Decides how each package will be made available. Packages not in the cache are looked
     /// up in parallel: on P3M, whose redirect says whether it has a binary for this R (on
-    /// Windows, P3M's Windows index of the date says so, with the file's MD5); in a
+    /// Windows and macOS, P3M's binary index of the date says so, with the file's MD5); in a
     /// repository's binary index (r-universe); GitHub packages are always built.
     pub fn assess(&self, wanted: &[Wanted]) -> Result<Vec<Plan>, InstallError> {
         let distro = self.platform.p3m_linux_name();
         let ua = self.platform.r_user_agent(&self.r.version);
         let minor = self.r.version.minor();
-        let windows = self.platform.os == Os::Windows && self.binary_key().is_some();
-        // P3M's Windows index for each snapshot date that is needed, loaded once.
-        let mut windows_indexes: HashMap<&str, Index> = HashMap::new();
-        if windows {
-            for w in wanted {
-                if let Origin::Snapshot(date) = &w.origin
-                    && !windows_indexes.contains_key(date.as_str())
-                    && self.cached(w).is_none()
-                {
-                    windows_indexes.insert(date, self.p3m.windows_index(date, &minor)?);
+        // On Windows and macOS: where P3M keeps binaries, and its index for each snapshot date
+        // that is needed, loaded once.
+        let binary_dir = match self.binary_key() {
+            Some(_) if wanted.iter().any(|w| self.uncached_date(w).is_some()) => self
+                .p3m
+                .binary_dir(self.platform.os, self.platform.arch, &minor)?,
+            _ => None,
+        };
+        let mut indexes: HashMap<&str, Index> = HashMap::new();
+        if let Some(dir) = &binary_dir {
+            for date in wanted.iter().filter_map(|w| self.uncached_date(w)) {
+                if !indexes.contains_key(date) {
+                    indexes.insert(date, self.p3m.binary_index(date, dir)?);
                 }
             }
         }
@@ -287,16 +300,14 @@ impl Context<'_> {
                 return Ok(Plan::Cached(path));
             }
             match &w.origin {
-                Origin::Snapshot(date) if windows => {
-                    let entry = windows_indexes
+                Origin::Snapshot(date) if let Some(dir) = &binary_dir => {
+                    let entry = indexes
                         .get(date.as_str())
                         .and_then(|i| i.get(&w.name))
                         .filter(|e| e.version == w.version);
                     Ok(match entry {
                         Some(e) => Plan::Binary {
-                            url: self
-                                .p3m
-                                .windows_package_url(date, &minor, &w.name, &w.version),
+                            url: self.p3m.binary_url(date, dir, &w.name, &w.version),
                             key: self.binary_key().expect("checked above"),
                             checksum: e.md5.clone().map(Checksum::Md5),
                         },
@@ -341,7 +352,11 @@ impl Context<'_> {
                             .and_then(|i| repo::entry(i, &w.name, &w.version))
                             .filter(|e| e.built)
                         {
-                            let ext = if windows { "zip" } else { "tar.gz" };
+                            let ext = if self.platform.os == Os::Windows {
+                                "zip"
+                            } else {
+                                "tar.gz"
+                            };
                             return Ok(Plan::Binary {
                                 url: repo::file_url(
                                     &contrib,
@@ -392,7 +407,11 @@ impl Context<'_> {
             items,
             self.jobs,
             |(w, url, key, checksum)| -> Result<(String, PathBuf), InstallError> {
-                let bytes = self.http.get_bytes(url, None)?;
+                let mut bytes = self.http.get_bytes(url, None)?;
+                // P3M's index and files can briefly disagree (V2): try once more.
+                if check_checksum(w, &bytes, *checksum).is_err() {
+                    bytes = self.http.get_bytes(url, None)?;
+                }
                 check_checksum(w, &bytes, *checksum)?;
                 let path = self.cache.insert_binary(&w.name, &w.version, key, &bytes)?;
                 Ok((w.name.clone(), path))
@@ -829,15 +848,28 @@ fn link_plan(
     Ok((to_link, to_remove))
 }
 
-/// Which build tools R needs are missing, read from R's configuration without running R: on
-/// Windows the Rtools that `etc/Rcmd_environ` names (V5), elsewhere the tools configured in
-/// `R_HOME/etc/Makeconf` (`CC`, `CXX`) and make (`R CMD config` needs make).
+/// Which build tools R needs are missing, without running R: on Windows the Rtools that
+/// `etc/Rcmd_environ` names (V5), on macOS Apple's command line tools (V6), on Linux the tools
+/// configured in `R_HOME/etc/Makeconf` (`CC`, `CXX`) and make (`R CMD config` needs make).
 pub fn missing_build_tools(r: &RInstallation) -> Vec<String> {
     if let Some((name, dir)) = rtools(r) {
         return if dir.join("usr/bin/make.exe").is_file() {
             Vec::new()
         } else {
             vec![name]
+        };
+    }
+    // On macOS, /usr/bin/clang and make exist even without the command line tools (they
+    // offer to install them), so ask xcode-select whether the tools are there (V6).
+    if cfg!(target_os = "macos") {
+        let present = Command::new("xcode-select")
+            .arg("-p")
+            .output()
+            .is_ok_and(|o| o.status.success());
+        return if present {
+            Vec::new()
+        } else {
+            vec!["Xcode command line tools".to_string()]
         };
     }
     let makeconf = std::fs::read_to_string(r.r_home.join("etc/Makeconf")).unwrap_or_default();

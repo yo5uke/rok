@@ -17,6 +17,7 @@ use crate::date;
 use crate::dcf::{self, Dependency};
 use crate::http::{Http, HttpError};
 use crate::paths::UserDirs;
+use crate::platform::{Arch, Os};
 use crate::version::Version;
 
 /// The public P3M instance.
@@ -191,17 +192,13 @@ impl P3m {
         )
     }
 
-    /// The URL of a Windows binary for R `r_minor` (`4.6`), as listed in [`P3m::windows_index`].
-    pub fn windows_package_url(
-        &self,
-        date: &str,
-        r_minor: &str,
-        name: &str,
-        version: &Version,
-    ) -> String {
+    /// The URL of a Windows or macOS binary, as listed in [`P3m::binary_index`].
+    pub fn binary_url(&self, date: &str, dir: &BinaryDir, name: &str, version: &Version) -> String {
         format!(
-            "{}/bin/windows/contrib/{r_minor}/{name}_{version}.zip",
-            self.cran_url(date)
+            "{}/{}/{name}_{version}.{}",
+            self.cran_url(date),
+            dir.path,
+            dir.ext
         )
     }
 
@@ -446,10 +443,88 @@ impl P3m {
     }
 }
 
+/// Where a snapshot keeps Windows or macOS binaries for one R minor version and CPU: the
+/// path under the snapshot (`bin/windows/contrib/4.6`, `bin/macosx/sonoma-arm64/contrib/4.6`)
+/// and the files' extension. Linux binaries come through the source URLs instead (V3).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BinaryDir {
+    pub path: String,
+    pub ext: &'static str,
+}
+
+/// How long P3M's list of macOS binary directories is reused.
+const STATUS_MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
+
 impl P3m {
-    /// The Windows binaries of a snapshot date for R `r_minor`, with each file's MD5 (`Hash`;
-    /// V2). Downloaded once and then read from the cache. Empty if P3M has none for that date.
-    pub fn windows_index(&self, date: &str, r_minor: &str) -> Result<Index, P3mError> {
+    /// Where P3M keeps binaries for R `r_minor` on this OS and CPU; `None` on Linux (see
+    /// [`P3m::linux_package_url`]) and where P3M builds none (Windows on ARM, old R on macOS).
+    pub fn binary_dir(
+        &self,
+        os: Os,
+        arch: Arch,
+        r_minor: &str,
+    ) -> Result<Option<BinaryDir>, P3mError> {
+        Ok(match (os, arch) {
+            (Os::Windows, Arch::X86_64) => Some(BinaryDir {
+                path: format!("bin/windows/contrib/{r_minor}"),
+                ext: "zip",
+            }),
+            (Os::MacOs, arch) => self.macos_name(r_minor, arch)?.map(|name| BinaryDir {
+                // An empty name means the plain directory (x86_64 for R 4.0 to 4.2).
+                path: if name.is_empty() {
+                    format!("bin/macosx/contrib/{r_minor}")
+                } else {
+                    format!("bin/macosx/{name}/contrib/{r_minor}")
+                },
+                ext: "tgz",
+            }),
+            _ => None,
+        })
+    }
+
+    /// P3M's name for the macOS binaries of R `r_minor` on a CPU (`sonoma-arm64`,
+    /// `big-sur-x86_64`), from `macos_urls` in `/__api__/status` (cached for a day).
+    fn macos_name(&self, r_minor: &str, arch: Arch) -> Result<Option<String>, P3mError> {
+        let path = self.cache.join("status.json");
+        let age = std::fs::metadata(&path)
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| SystemTime::now().duration_since(t).ok());
+        let cached = std::fs::read(&path).ok();
+        let url = format!("{}/__api__/status", self.base);
+        let body = match (&cached, age) {
+            (Some(b), Some(age)) if age < STATUS_MAX_AGE => b.clone(),
+            _ => match self.http.get_bytes(&url, None) {
+                Ok(b) => {
+                    write_atomic(&path, &b)?;
+                    b
+                }
+                Err(e) => cached.ok_or(e)?,
+            },
+        };
+        #[derive(Deserialize)]
+        struct Status {
+            #[serde(default)]
+            macos_urls: HashMap<String, HashMap<String, String>>,
+        }
+        let status: Status = serde_json::from_slice(&body).map_err(|e| P3mError::Response {
+            url,
+            message: e.to_string(),
+        })?;
+        let arch = match arch {
+            Arch::Aarch64 => "arm64",
+            Arch::X86_64 => "x86_64",
+        };
+        Ok(status
+            .macos_urls
+            .get(r_minor)
+            .and_then(|m| m.get(arch))
+            .cloned())
+    }
+
+    /// The Windows or macOS binaries of a snapshot date in `dir`, with each file's MD5
+    /// (`Hash`; V2). Downloaded once and then read from the cache. Empty if P3M has none.
+    pub fn binary_index(&self, date: &str, dir: &BinaryDir) -> Result<Index, P3mError> {
         if !date::is_valid(date) {
             return Err(SnapshotError::InvalidDate(date.to_string()).into());
         }
@@ -457,9 +532,9 @@ impl P3m {
             .cache
             .join("cran")
             .join(date)
-            .join(format!("windows-{r_minor}"))
+            .join(dir.path.replace('/', "_"))
             .join("PACKAGES.gz");
-        let label = format!("{date} (Windows, R {r_minor})");
+        let label = format!("{date} ({})", dir.path);
         if let Ok(gz) = std::fs::read(&path) {
             let text = gunzip(&gz).map_err(|message| P3mError::Response {
                 url: path.display().to_string(),
@@ -467,10 +542,7 @@ impl P3m {
             })?;
             return Ok(Index::parse(&label, &text));
         }
-        let url = format!(
-            "{}/bin/windows/contrib/{r_minor}/PACKAGES.gz",
-            self.cran_url(date)
-        );
+        let url = format!("{}/{}/PACKAGES.gz", self.cran_url(date), dir.path);
         let bytes = match self.http.get_bytes(&url, None) {
             Ok(b) => b,
             Err(HttpError::Status { status: 404, .. }) => return Ok(Index::parse(&label, "")),

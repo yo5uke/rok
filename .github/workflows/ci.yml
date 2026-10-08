@@ -21,8 +21,6 @@ jobs:
   rust:
     name: Rust (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    # macOS is not supported yet; its results are shown but do not fail the run.
-    continue-on-error: ${{ matrix.os == 'macos-latest' }}
     strategy:
       fail-fast: false
       matrix:
@@ -90,7 +88,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, windows-latest]
+        os: [ubuntu-24.04, windows-latest, macos-latest]
     steps:
       - uses: actions/checkout@v5
       - uses: r-lib/actions/setup-r@v2

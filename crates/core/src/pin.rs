@@ -14,7 +14,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use crate::lockfile::Lockfile;
 use crate::ops::Env;
 use crate::par;
-use crate::platform::{Arch, Os};
+use crate::platform::Os;
 use crate::resolve::release_snapshots;
 use crate::version::Version;
 
@@ -40,9 +40,10 @@ pub type Item = (String, Version, String);
 /// machine's distribution, or on Windows.
 pub struct BinaryChecker<'a> {
     env: &'a Env,
-    /// P3M's name of the Linux distribution; `None` on Windows.
+    /// P3M's name of the Linux distribution; `None` on Windows and macOS.
     distro: Option<&'static str>,
-    r_minor: String,
+    /// Where P3M keeps Windows or macOS binaries.
+    dir: Option<crate::p3m::BinaryDir>,
     user_agent: String,
     path: PathBuf,
     known: Mutex<BTreeMap<String, bool>>,
@@ -52,13 +53,23 @@ pub struct BinaryChecker<'a> {
 impl<'a> BinaryChecker<'a> {
     /// `None` where P3M builds no binaries for this machine.
     pub fn new(env: &'a Env, r_version: &Version) -> Option<BinaryChecker<'a>> {
-        let distro = match (env.platform.os, env.platform.arch) {
-            (Os::Windows, Arch::X86_64) => None,
-            _ => Some(env.platform.p3m_linux_name()?),
+        let (distro, dir) = match env.platform.os {
+            Os::Linux => (Some(env.platform.p3m_linux_name()?), None),
+            os => (
+                None,
+                Some(
+                    env.p3m
+                        .binary_dir(os, env.platform.arch, &r_version.minor())
+                        .ok()??,
+                ),
+            ),
         };
         let path = env.p3m.cache_dir().join("binaries").join(format!(
             "{}-{}-R{}.json",
-            distro.unwrap_or("windows"),
+            distro.unwrap_or(match env.platform.os {
+                Os::MacOs => "macos",
+                _ => "windows",
+            }),
             env.platform.arch.r_name(),
             r_version.minor()
         ));
@@ -69,7 +80,7 @@ impl<'a> BinaryChecker<'a> {
         Some(BinaryChecker {
             env,
             distro,
-            r_minor: r_version.minor(),
+            dir,
             user_agent: env.platform.r_user_agent(r_version),
             path,
             known: Mutex::new(known),
@@ -98,17 +109,15 @@ impl<'a> BinaryChecker<'a> {
         }
         let answers = par::map(&unknown, self.env.jobs, |(n, v, date)| {
             self.sent.fetch_add(1, Ordering::Relaxed);
-            // On Linux P3M picks the binary for the R in the User-Agent; Windows binaries have
-            // their own URLs (404 when there is none).
-            let (url, user_agent) = match self.distro {
-                Some(d) => (
+            // On Linux P3M picks the binary for the R in the User-Agent; Windows and macOS
+            // binaries have their own URLs (404 when there is none).
+            let (url, user_agent) = match (self.distro, &self.dir) {
+                (Some(d), _) => (
                     self.env.p3m.linux_package_url(d, date, n, v),
                     Some(self.user_agent.as_str()),
                 ),
-                None => (
-                    self.env.p3m.windows_package_url(date, &self.r_minor, n, v),
-                    None,
-                ),
+                (None, Some(dir)) => (self.env.p3m.binary_url(date, dir, n, v), None),
+                (None, None) => unreachable!("one of them is set in new()"),
             };
             self.env
                 .http
