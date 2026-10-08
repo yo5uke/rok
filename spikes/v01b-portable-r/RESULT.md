@@ -3,7 +3,7 @@
 実施：2026-10-05（docker の `ubuntu:24.04`、一般ユーザー（ホストと同じ uid））
 再現：`./run.sh`（A と C）。ソースからのビルド（B）は `../v03c-build-tools/run.sh` で確かめた。
 予備確認は `../v01-linux-r-install/portable.sh` と、その RESULT.md の追記にある。
-Windows・macOS 向けの portable なビルドと、IDE（Positron）の認識は、まだ確かめていない（2-1、2-2 で行う）。
+Windows 向けは `../v05-windows-r-install/RESULT.md` で確かめた（成功）。macOS 向けと、IDE（Positron）の認識は、まだ確かめていない。
 
 ## 結論
 
