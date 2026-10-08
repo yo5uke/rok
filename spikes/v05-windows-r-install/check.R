@@ -21,9 +21,9 @@ cat("バイナリ：jsonlite・data.table を", round(t[["elapsed"]], 1), "秒�
     format(packageVersion("data.table", lib.loc = lib)), "が動く：",
     data.table(x = 1:3)[, sum(x)] == 6, "\n")
 
-# Rtools は R の etc/Rcmd_environ が参照する（RTOOLS45_HOME、既定は c:/rtools45）
-rcmd <- readLines(file.path(R.home("etc"), "Rcmd_environ"))
-cat("Rcmd_environ：", grep("RTOOLS", rcmd, value = TRUE)[1], "\n")
+# Rtools は R の etc/Rcmd_environ が参照する（Windows のみ。RTOOLS45_HOME、既定は c:/rtools45）
+rcmd <- file.path(R.home("etc"), "Rcmd_environ")
+if (file.exists(rcmd)) cat("Rcmd_environ：", grep("RTOOLS", readLines(rcmd), value = TRUE)[1], "\n")
 t <- system.time(res <- tryCatch({
   utils::install.packages("cli", lib = lib, repos = repo, type = "source", quiet = TRUE)
   requireNamespace("cli", lib.loc = lib, quietly = TRUE)

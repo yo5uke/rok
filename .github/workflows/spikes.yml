@@ -1,0 +1,20 @@
+name: Spikes
+
+# Phase-0 checks that need machines we do not have (macOS). Run by hand.
+on:
+  workflow_dispatch:
+
+jobs:
+  macos:
+    name: macOS (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, macos-15-intel]
+    steps:
+      - uses: actions/checkout@v5
+      - name: V6 and V1b (R installation)
+        run: spikes/v06-macos-r-install/run.sh
+      - name: V2 (binary packages)
+        run: spikes/v02-binary-extract/run-macos.sh
