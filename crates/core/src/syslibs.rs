@@ -79,7 +79,7 @@ pub fn elf_deps(path: &Path) -> Option<ElfDeps> {
     let entries = read_at(&mut f, offset, usize::try_from(size.min(1 << 20)).ok()?)?;
     let (mut strtab, mut strsz) = (None, 0u64);
     let (mut needed, mut search) = (Vec::new(), Vec::new());
-    for e in entries.chunks_exact(16) {
+    for e in entries.as_chunks::<16>().0 {
         let (tag, val) = (u64_at(e, 0), u64_at(e, 8));
         match tag {
             0 => break,
