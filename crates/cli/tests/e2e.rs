@@ -200,3 +200,58 @@ fn hands_questions_back_to_programs() {
     assert_eq!(answered["name"], "sub");
     assert!(proj.join("sub/rok.toml").is_file());
 }
+
+#[test]
+#[ignore = "needs the network and R"]
+fn activates_projects_at_r_startup() {
+    let t = tempfile::tempdir().unwrap();
+    let home = t.path();
+    json(&rok(home, &["init", "proj", "--json"]));
+    let proj = home.join("proj");
+    json(&rok(&proj, &["add", "R6", "--json"]));
+    let r_home = String::from_utf8(
+        Command::new("Rscript")
+            .args(["-e", "cat(R.home())"])
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap();
+    let activate = |extra: &[&str]| {
+        let mut args = vec!["activate", "--r-home", r_home.as_str()];
+        args.extend_from_slice(extra);
+        rok(&proj, &args)
+    };
+
+    // In sync: one line for people, the library for R.
+    let out = activate(&["--interactive"]);
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.starts_with("library=") && stdout.contains("/.rok/library/R-"));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("rok: proj (R "));
+
+    // Out of sync in a non-interactive session: a warning, nothing synced (the default).
+    let lib = stdout.trim().strip_prefix("library=").unwrap().to_string();
+    std::fs::remove_file(std::path::Path::new(&lib).join("R6")).unwrap();
+    let out = activate(&[]);
+    assert!(out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("not synced"));
+    assert!(!std::path::Path::new(&lib).join("R6").exists());
+
+    // Interactive: a light sync happens by itself.
+    let out = activate(&["--interactive"]);
+    assert!(out.status.success());
+    assert!(std::path::Path::new(&lib).join("R6/DESCRIPTION").is_file());
+
+    // Strict mode stops R (exit status 3).
+    let mut manifest = std::fs::read_to_string(proj.join("rok.toml")).unwrap();
+    manifest.push_str("\n[sync]\nnoninteractive = \"error\"\n");
+    std::fs::write(proj.join("rok.toml"), manifest).unwrap();
+    assert_eq!(
+        activate(&[]).status.code(),
+        Some(0),
+        "in sync: nothing to stop for"
+    );
+    std::fs::remove_file(std::path::Path::new(&lib).join("R6")).unwrap();
+    assert_eq!(activate(&[]).status.code(), Some(3));
+}

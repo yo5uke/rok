@@ -7,7 +7,7 @@ use crate::cache::PackageCache;
 use crate::constraint::Constraint;
 use crate::dcf::Dependency;
 use crate::github::{GitHub, GitHubError};
-use crate::http::Http;
+use crate::http::{Http, HttpError};
 use crate::install::{self, Built, Context, InstallError, LinkReport, Plan, Wanted};
 use crate::lockfile::{LockedPackage, Lockfile, ManifestCopy, Snapshot, Source, name_order};
 use crate::manifest::{DependencySource, DependencySpec, GitRef, Manifest};
@@ -40,6 +40,26 @@ pub enum OpError {
     Install(Box<InstallError>),
     #[error("{0}")]
     Message(String),
+}
+
+impl OpError {
+    /// Whether the error is a failure to reach a server (offline), as opposed to an answer.
+    pub fn is_offline(&self) -> bool {
+        let transport = |e: &HttpError| matches!(e, HttpError::Transport { .. });
+        match self {
+            OpError::Install(e) => match e.as_ref() {
+                InstallError::Http(h)
+                | InstallError::P3m(P3mError::Http(h))
+                | InstallError::Repo(RepoError::Http(h))
+                | InstallError::GitHub(GitHubError::Http(h)) => transport(h),
+                _ => false,
+            },
+            OpError::P3m(P3mError::Http(h))
+            | OpError::Repo(RepoError::Http(h))
+            | OpError::GitHub(GitHubError::Http(h)) => transport(h),
+            _ => false,
+        }
+    }
 }
 
 impl From<InstallError> for OpError {
@@ -641,9 +661,48 @@ pub fn diff(old: Option<&Lockfile>, new: &Lockfile) -> Vec<Change> {
 /// How each package of a lockfile will be made available.
 pub struct SyncPlan {
     pub items: Vec<(Wanted, Plan)>,
+    /// Packages left out of a partial sync: their links in the library stay as they are.
+    pub keep: HashSet<String>,
 }
 
 impl SyncPlan {
+    /// Leaves out `excluded` packages and, transitively, every package that needs one of them
+    /// (a partial sync: binaries only, or offline). Returns the rest and, for each package
+    /// left out, why.
+    pub fn without(
+        self,
+        excluded: Vec<(String, String)>,
+        lock: &Lockfile,
+    ) -> (SyncPlan, Vec<(String, String)>) {
+        let mut out: Vec<(String, String)> = excluded;
+        let mut names: HashSet<String> = out.iter().map(|(n, _)| n.clone()).collect();
+        loop {
+            let more: Vec<(String, String)> = lock
+                .packages
+                .iter()
+                .filter(|p| !names.contains(&p.name))
+                .filter_map(|p| {
+                    let dep = p.dependencies.iter().find(|d| names.contains(*d))?;
+                    Some((p.name.clone(), format!("needs {dep}")))
+                })
+                .collect();
+            if more.is_empty() {
+                break;
+            }
+            names.extend(more.iter().map(|(n, _)| n.clone()));
+            out.extend(more);
+        }
+        out.sort_by(|a, b| name_order(&a.0, &b.0));
+        let items = self
+            .items
+            .into_iter()
+            .filter(|(w, _)| !names.contains(&w.name))
+            .collect();
+        let mut keep = self.keep;
+        keep.extend(names);
+        (SyncPlan { items, keep }, out)
+    }
+
     /// Packages that must be built from source (a "heavy" sync).
     pub fn sources(&self) -> Vec<&Wanted> {
         self.items
@@ -677,7 +736,56 @@ pub fn plan_sync(
     manifest: &Manifest,
     r: &RInstallation,
 ) -> Result<SyncPlan, OpError> {
-    let wanted = lock
+    let wanted = wanted_from_lock(lock, manifest)?;
+    let plans = env.context(r).assess(&wanted)?;
+    Ok(SyncPlan {
+        items: wanted.into_iter().zip(plans).collect(),
+        keep: HashSet::new(),
+    })
+}
+
+/// Plans a sync from the cache alone (P3M cannot be reached): packages not in the cache are
+/// left out, with the packages that need them.
+pub fn plan_sync_offline(
+    env: &Env,
+    lock: &Lockfile,
+    manifest: &Manifest,
+    r: &RInstallation,
+) -> Result<(SyncPlan, Vec<(String, String)>), OpError> {
+    let ctx = env.context(r);
+    let mut items = Vec::new();
+    let mut missing = Vec::new();
+    for w in wanted_from_lock(lock, manifest)? {
+        match ctx.cached(&w) {
+            Some(path) => items.push((w, Plan::Cached(path))),
+            None => missing.push((w.name.clone(), "not in the cache".to_string())),
+        }
+    }
+    let plan = SyncPlan {
+        items,
+        keep: HashSet::new(),
+    };
+    Ok(plan.without(missing, lock))
+}
+
+/// The library as it should be, if every package of `lock` is in the cache: (name, cached
+/// path) pairs. `None` if something must be downloaded or built. Uses no network.
+pub fn cached_library(
+    env: &Env,
+    lock: &Lockfile,
+    manifest: &Manifest,
+    r: &RInstallation,
+) -> Result<Option<Vec<(String, PathBuf)>>, OpError> {
+    let ctx = env.context(r);
+    Ok(wanted_from_lock(lock, manifest)?
+        .iter()
+        .map(|w| ctx.cached(w).map(|p| (w.name.clone(), p)))
+        .collect())
+}
+
+/// What the library needs for `lock`.
+fn wanted_from_lock(lock: &Lockfile, manifest: &Manifest) -> Result<Vec<Wanted>, OpError> {
+    lock
         .packages
         .iter()
         .map(|p| {
@@ -730,11 +838,7 @@ pub fn plan_sync(
                 },
             })
         })
-        .collect::<Result<Vec<Wanted>, OpError>>()?;
-    let plans = env.context(r).assess(&wanted)?;
-    Ok(SyncPlan {
-        items: wanted.into_iter().zip(plans).collect(),
-    })
+        .collect()
 }
 
 /// What a sync did.
@@ -787,7 +891,7 @@ pub fn execute_sync(
     };
     let mut all: Vec<(String, PathBuf)> = paths.into_iter().collect();
     all.sort();
-    let link = install::link(library, &all, env.cache.root())?;
+    let link = install::link(library, &all, env.cache.root(), &plan.keep)?;
     Ok(SyncReport {
         downloaded: binaries.len(),
         built,

@@ -33,13 +33,10 @@ rok_binary <- function() {
   if (!is.null(the$binary) && file.exists(the$binary)) {
     return(the$binary)
   }
-  candidates <- c(
-    getOption("rok.binary", ""),
-    Sys.getenv("ROK_BINARY"),
-    binary_path(),
-    Sys.which("rok")
-  )
+  candidates <- c(getOption("rok.binary", ""), Sys.getenv("ROK_BINARY"), binary_path())
   candidates <- candidates[nzchar(candidates) & file.exists(candidates)]
+  # Searching PATH runs `which`, which is slow: only when nothing else is found.
+  if (!length(candidates) && nzchar(on_path <- Sys.which("rok"))) candidates <- on_path
   if (!length(candidates)) {
     stop(
       "The rok binary is not installed.\n",

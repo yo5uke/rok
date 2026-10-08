@@ -652,51 +652,93 @@ pub struct LinkReport {
 
 /// Makes `library` contain exactly the given packages as links into the cache. Entries that
 /// rok did not create (not links into `cache_root`) are left alone unless a wanted package
-/// has the same name, in which case the lockfile wins.
+/// has the same name, in which case the lockfile wins. rok's links named in `keep` stay even
+/// if they are not wanted (packages a partial sync left as they were).
 pub fn link(
     library: &Path,
     packages: &[(String, PathBuf)],
     cache_root: &Path,
+    keep: &HashSet<String>,
 ) -> Result<LinkReport, InstallError> {
     std::fs::create_dir_all(library).map_err(io_err(library))?;
-    let wanted: HashMap<&str, &Path> = packages
-        .iter()
-        .map(|(n, p)| (n.as_str(), p.as_path()))
-        .collect();
+    let (to_link, to_remove) = link_plan(library, packages, cache_root, keep)?;
     let mut report = LinkReport::default();
-
-    for entry in std::fs::read_dir(library).map_err(io_err(library))? {
-        let entry = entry.map_err(io_err(library))?;
-        let path = entry.path();
-        let name = entry.file_name().to_string_lossy().into_owned();
-        if wanted.contains_key(name.as_str()) || name.starts_with('.') {
-            continue;
-        }
-        let target = std::fs::read_link(&path).ok();
-        if target.is_some_and(|t| t.starts_with(cache_root)) {
-            std::fs::remove_file(&path).map_err(io_err(&path))?;
-            report.removed.push(name);
-        }
+    for name in to_remove {
+        let path = library.join(&name);
+        std::fs::remove_file(&path).map_err(io_err(&path))?;
+        report.removed.push(name);
     }
-
-    for (name, target) in packages {
-        let path = library.join(name);
-        if std::fs::read_link(&path).ok().as_deref() == Some(target.as_path()) {
-            continue;
-        }
+    for (name, target) in to_link {
+        let path = library.join(&name);
         // Create the new link beside the old entry, then swap it in.
         let tmp = library.join(format!(".{name}.rok-tmp"));
         let _ = std::fs::remove_file(&tmp);
-        symlink_dir(target, &tmp)?;
+        symlink_dir(&target, &tmp)?;
         if path.is_dir() && std::fs::read_link(&path).is_err() {
             std::fs::remove_dir_all(&path).map_err(io_err(&path))?;
         }
         std::fs::rename(&tmp, &path).map_err(io_err(&path))?;
-        report.linked.push(name.clone());
+        report.linked.push(name);
     }
-    report.linked.sort();
-    report.removed.sort();
     Ok(report)
+}
+
+/// What [`link`] would change, without changing anything.
+pub fn link_changes(
+    library: &Path,
+    packages: &[(String, PathBuf)],
+    cache_root: &Path,
+) -> Result<LinkReport, InstallError> {
+    if !library.is_dir() {
+        let mut linked: Vec<String> = packages.iter().map(|(n, _)| n.clone()).collect();
+        linked.sort();
+        return Ok(LinkReport {
+            linked,
+            removed: Vec::new(),
+        });
+    }
+    let (to_link, removed) = link_plan(library, packages, cache_root, &HashSet::new())?;
+    Ok(LinkReport {
+        linked: to_link.into_iter().map(|(n, _)| n).collect(),
+        removed,
+    })
+}
+
+/// The links to create and the links to remove, both sorted by name.
+type LinkPlan = (Vec<(String, PathBuf)>, Vec<String>);
+
+fn link_plan(
+    library: &Path,
+    packages: &[(String, PathBuf)],
+    cache_root: &Path,
+    keep: &HashSet<String>,
+) -> Result<LinkPlan, InstallError> {
+    let wanted: HashMap<&str, &Path> = packages
+        .iter()
+        .map(|(n, p)| (n.as_str(), p.as_path()))
+        .collect();
+    let mut to_remove = Vec::new();
+    for entry in std::fs::read_dir(library).map_err(io_err(library))? {
+        let entry = entry.map_err(io_err(library))?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if wanted.contains_key(name.as_str()) || name.starts_with('.') || keep.contains(&name) {
+            continue;
+        }
+        let target = std::fs::read_link(entry.path()).ok();
+        if target.is_some_and(|t| t.starts_with(cache_root)) {
+            to_remove.push(name);
+        }
+    }
+    let mut to_link: Vec<(String, PathBuf)> = packages
+        .iter()
+        .filter(|(name, target)| {
+            std::fs::read_link(library.join(name)).ok().as_deref() != Some(target.as_path())
+        })
+        .cloned()
+        .collect();
+    to_link.sort();
+    to_remove.sort();
+    Ok((to_link, to_remove))
 }
 
 fn symlink_dir(target: &Path, link: &Path) -> Result<(), InstallError> {
@@ -834,20 +876,36 @@ mod tests {
             mk(p);
         }
         mk(&lib.join("userpkg"));
+        let none = HashSet::new();
+        assert_eq!(
+            link_changes(&lib, &[("a".into(), a1.clone())], &cache)
+                .unwrap()
+                .linked,
+            ["a"]
+        );
         let r = link(
             &lib,
             &[("a".into(), a1.clone()), ("old".into(), old.clone())],
             &cache,
+            &none,
         )
         .unwrap();
         assert_eq!(r.linked, ["a", "old"]);
+        // A partial sync keeps links it was told to keep.
+        let kept = HashSet::from(["old".to_string()]);
+        let r = link(&lib, &[("a".into(), a1.clone())], &cache, &kept).unwrap();
+        assert_eq!(r, LinkReport::default());
+        assert!(lib.join("old").exists());
         // Change a's version, add b, drop old; the user's own package stays.
-        let r = link(
-            &lib,
-            &[("a".into(), a2.clone()), ("b".into(), b.clone())],
-            &cache,
-        )
-        .unwrap();
+        let wanted = [("a".to_string(), a2.clone()), ("b".to_string(), b.clone())];
+        assert_eq!(
+            link_changes(&lib, &wanted, &cache).unwrap(),
+            LinkReport {
+                linked: vec!["a".into(), "b".into()],
+                removed: vec!["old".into()]
+            }
+        );
+        let r = link(&lib, &wanted, &cache, &none).unwrap();
         assert_eq!(
             r,
             LinkReport {
@@ -859,7 +917,11 @@ mod tests {
         assert!(lib.join("userpkg").is_dir());
         // Nothing to do the second time.
         assert_eq!(
-            link(&lib, &[("a".into(), a2), ("b".into(), b)], &cache).unwrap(),
+            link(&lib, &wanted, &cache, &none).unwrap(),
+            LinkReport::default()
+        );
+        assert_eq!(
+            link_changes(&lib, &wanted, &cache).unwrap(),
             LinkReport::default()
         );
     }

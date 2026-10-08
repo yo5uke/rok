@@ -1,5 +1,6 @@
 //! Command-line entry point of rok.
 
+mod activate;
 mod commands;
 mod rcmd;
 mod ui;
@@ -95,6 +96,19 @@ enum Command {
         )]
         args: Vec<String>,
     },
+    /// Check the project when R starts, and sync it if needed (run by .rok/activate.R).
+    #[command(hide = true)]
+    Activate {
+        /// R_HOME of the R that is starting.
+        #[arg(long, value_name = "DIR")]
+        r_home: PathBuf,
+        /// Whether the R session is interactive.
+        #[arg(long)]
+        interactive: bool,
+        /// The answer to the question about syncing.
+        #[arg(long, value_enum)]
+        choice: Option<activate::SyncChoice>,
+    },
     /// Manage R itself: list, install, uninstall, and the project's R version.
     R {
         #[command(subcommand)]
@@ -178,6 +192,14 @@ fn main() -> ExitCode {
             dry_run,
         } => commands::update(&ui, project, &packages, to, dry_run),
         Command::Undo => commands::undo(&ui, project),
+        Command::Activate {
+            r_home,
+            interactive,
+            choice,
+        } => match activate::activate(&ui, &r_home, interactive, choice) {
+            Ok(code) => return code,
+            Err(e) => Err(e),
+        },
         Command::Run { r, args } => match rcmd::run(&ui, project, r, &args) {
             Ok(code) => return code,
             Err(e) => Err(e),

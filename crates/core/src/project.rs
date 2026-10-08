@@ -41,8 +41,11 @@ fn io_err(path: &Path) -> impl FnOnce(std::io::Error) -> ProjectError + '_ {
 /// The line `.Rprofile` uses to run the startup hook.
 pub const RPROFILE_LINE: &str = "source(\".rok/activate.R\")";
 
-/// The startup hook. It must run with base R only, also where rok is not installed.
-pub const ACTIVATE_R: &str = r#"# rok: activates this project's library. Created by rok; do not edit.
+/// The startup hook (requirements chapter 8). It must run with base R only, also where rok is
+/// not installed. It asks the rok binary (`rok activate`) whether the library is in sync and
+/// lets it sync, asks the person when the binary needs an answer, and then sets the library
+/// paths: the project library, rok's own package, and R's library (no user or site library).
+pub const ACTIVATE_R: &str = r#"# rok: activates this project's library and keeps it in sync. Created by rok; do not edit.
 local({
   minor <- paste(R.version$major, sub("[.].*$", "", R.version$minor), sep = ".")
   arch <- R.version$arch
@@ -64,9 +67,75 @@ local({
     else paste0("linux-", arch)
   }
   lib <- file.path(getwd(), ".rok", "library", paste0("R-", minor), tag)
+  # tools::R_user_dir("rok", "data"), written out: loading tools would slow every start.
+  data <- Sys.getenv("ROK_DATA_DIR")
+  if (!nzchar(data)) {
+    base <- Sys.getenv("R_USER_DATA_DIR")
+    if (!nzchar(base)) base <- Sys.getenv("XDG_DATA_HOME")
+    if (!nzchar(base)) {
+      base <- if (.Platform$OS.type == "windows") {
+        file.path(Sys.getenv("APPDATA"), "R", "data")
+      } else if (Sys.info()[["sysname"]] == "Darwin") {
+        file.path(normalizePath("~"), "Library", "Application Support", "org.R-project.R")
+      } else {
+        file.path(normalizePath("~"), ".local", "share")
+      }
+    }
+    data <- file.path(base, "R", "rok")
+  }
+  exe <- if (.Platform$OS.type == "windows") "rok.exe" else "rok"
+  find_binary <- function() {
+    for (bin in c(Sys.getenv("ROK_BINARY"), file.path(data, "bin", exe))) {
+      if (nzchar(bin) && file.exists(bin)) return(bin)
+    }
+    # Searching PATH runs `which`, which costs more than everything else here: last resort.
+    bin <- Sys.which("rok")
+    if (nzchar(bin)) bin else NA_character_
+  }
+  bin <- find_binary()
+  if (is.na(bin) && interactive()) {
+    # A collaborator without rok: offer to install it (one question), then sync.
+    if (nzchar(system.file(package = "rok"))) {
+      if (isTRUE(utils::askYesNo("This project uses rok, whose engine is not installed. Install it now?"))) {
+        op <- options(rok.yes = TRUE)
+        ok <- tryCatch({ rok::setup(); TRUE }, error = function(e) { message(conditionMessage(e)); FALSE })
+        options(op)
+        if (ok) bin <- find_binary()
+      }
+    } else {
+      message("! This project uses rok to manage its packages, but rok is not installed.\n",
+              "i Install it with `install.packages(\"rok\")`, then restart R.")
+    }
+  }
+  if (!is.na(bin)) {
+    args <- c("activate", "--r-home", R.home(), if (interactive()) "--interactive")
+    repeat {
+      out <- tryCatch(
+        suppressWarnings(system2(bin, shQuote(args), stdout = TRUE, stderr = "")),
+        error = function(e) structure(character(), status = 1L)
+      )
+      status <- attr(out, "status")
+      if (is.null(status)) status <- 0L
+      value <- function(key) sub(paste0("^", key, "="), "", grep(paste0("^", key, "="), out, value = TRUE))
+      if (status == 2L && length(value("choice"))) {
+        choices <- value("option")
+        pick <- utils::menu(sub("^[^\t]*\t", "", choices), title = value("question")[1L])
+        # Cancelling picks the last option, which syncs nothing.
+        if (pick == 0L) pick <- length(choices)
+        args <- c(args, "--choice", sub("\t.*$", "", choices[[pick]]))
+        next
+      }
+      # Strict mode in a non-interactive session: stop instead of running out of sync.
+      if (status == 3L) quit(save = "no", status = 1L)
+      if (length(value("library"))) lib <- value("library")[[1L]]
+      break
+    }
+  }
   dir.create(lib, recursive = TRUE, showWarnings = FALSE)
-  # Use only the project library and R's own library: no user or site libraries.
-  assign(".lib.loc", unique(c(normalizePath(lib), .Library)), envir = environment(.libPaths))
+  # rok's own R package, so that rok::sync() and the others work in the project.
+  own <- if (nzchar(data)) file.path(data, "library", paste0("R-", minor)) else character()
+  own <- own[dir.exists(own)]
+  assign(".lib.loc", unique(c(normalizePath(lib), own, .Library)), envir = environment(.libPaths))
 })
 "#;
 
@@ -194,6 +263,17 @@ impl Project {
 
     /// Creates `.rok/activate.R` and `.rok/.gitignore`, and makes `.Rprofile` run the hook.
     /// Returns whether an existing `.Rprofile` was changed.
+    /// Rewrites `.rok/activate.R` if it differs from this version of rok's (after rok was
+    /// updated). Returns whether it changed.
+    pub fn refresh_activate(&self) -> Result<bool, ProjectError> {
+        let p = self.rok_dir().join("activate.R");
+        if std::fs::read_to_string(&p).is_ok_and(|t| t == ACTIVATE_R) {
+            return Ok(false);
+        }
+        write_atomic(&p, ACTIVATE_R.as_bytes()).map_err(io_err(&p))?;
+        Ok(true)
+    }
+
     pub fn install_startup_hook(&self) -> Result<bool, ProjectError> {
         let dir = self.rok_dir();
         for (name, content) in [("activate.R", ACTIVATE_R), (".gitignore", ROK_GITIGNORE)] {

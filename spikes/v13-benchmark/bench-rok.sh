@@ -4,7 +4,8 @@
 #   S4 cold：キャッシュ（ROK_CACHE_DIR）とライブラリを消して `rok sync`
 #   S3 warm：ライブラリだけを消して `rok sync`
 #   S2 solve：索引をキャッシュ済みの状態で、同じ日付のまま全体を解き直す（`rok update --to <日付> --dry-run`）
-#   S1 start：同期済みのプロジェクトで `Rscript -e 'invisible(0)'`。基準（none）は空の .Rprofile の空ディレクトリ
+#   S1 start：同期済みのプロジェクトで `Rscript -e 'invisible(0)'`（activate.R が `rok activate` で
+#             変化の有無を確かめる）。基準（none）は空の .Rprofile の空ディレクトリ
 # 結果は out/results-rok.csv に書く。集計は `python3 summarize.py out/results-rok.csv`。
 # 使い方：ROK=<rok のバイナリ> ./bench-rok.sh（既定は ../../target/release/rok）
 set -euo pipefail
@@ -15,7 +16,8 @@ DATE=2026-10-05
 N_COLD=${N_COLD:-3} N_WARM=${N_WARM:-5} N_SOLVE=${N_SOLVE:-5} N_START=${N_START:-10}
 PROJECTS=${PROJECTS:-"small medium gis"}
 declare -A ROOTS=([small]="fixest modelsummary" [medium]="tidyverse" [gis]="sf terra tmap")
-export ROK_CACHE_DIR=$OUT/rok/cache ROK_DATA_DIR=$OUT/rok/data NO_COLOR=1 HOME=$OUT/home
+# ROK_BINARY: activate.R finds the binary there (instead of the place setup() puts it).
+export ROK_CACHE_DIR=$OUT/rok/cache ROK_DATA_DIR=$OUT/rok/data NO_COLOR=1 HOME=$OUT/home ROK_BINARY=$ROK
 CSV=$OUT/results-rok.csv
 mkdir -p "$OUT/log" "$OUT/proj"
 [ -f "$CSV" ] || echo "tool,project,scenario,run,seconds,status,npkgs" > "$CSV"

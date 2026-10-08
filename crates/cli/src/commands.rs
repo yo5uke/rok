@@ -161,7 +161,7 @@ pub(crate) fn sync_library(
 }
 
 /// Shows packages that cannot load until system libraries are installed, and the apt command.
-fn explain_missing_libraries(
+pub(crate) fn explain_missing_libraries(
     ui: &Ui,
     missing: &std::collections::BTreeMap<String, Vec<String>>,
     advice: &rok_core::syslibs::AptAdvice,
@@ -672,6 +672,8 @@ fn sync_project(
     r: &RInstallation,
     locked: bool,
 ) -> anyhow::Result<(Lockfile, Vec<ops::Change>, ops::SyncReport)> {
+    // A newer rok may have a newer startup hook.
+    project.refresh_activate()?;
     let current = old_lock
         .as_ref()
         .filter(|l| ops::lock_is_current(manifest, l));
