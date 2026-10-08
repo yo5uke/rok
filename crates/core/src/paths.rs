@@ -14,6 +14,10 @@
 //!
 //! `ROK_DATA_DIR` and `ROK_CACHE_DIR` name rok's directories directly (no `R/rok` is added);
 //! they exist to isolate tests and benchmarks. Empty variables count as unset, as in R.
+//!
+//! R itself goes to `<data>/r/<version>`, except on Windows, where it goes to
+//! `%LOCALAPPDATA%/Programs/R/R-<version>` beside R installed by CRAN's installer, so that IDEs
+//! find it (requirements chapter 6). With `ROK_DATA_DIR` set, it stays under `<data>/r`.
 
 use std::path::PathBuf;
 
@@ -26,6 +30,8 @@ pub struct UserDirs {
     pub data: PathBuf,
     /// Re-creatable data: package indexes, downloaded and extracted packages.
     pub cache: PathBuf,
+    /// Where rok installs R.
+    pub r: PathBuf,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -67,7 +73,8 @@ impl UserDirs {
                     Os::Linux => Ok(home()?.join(linux)),
                 }
             };
-        let data = match var("ROK_DATA_DIR") {
+        let overridden = var("ROK_DATA_DIR");
+        let data = match overridden.clone() {
             Some(p) => p,
             None => base(
                 "R_USER_DATA_DIR",
@@ -91,12 +98,28 @@ impl UserDirs {
             .join("R")
             .join("rok"),
         };
-        Ok(UserDirs { data, cache })
+        let r = match (os, overridden) {
+            (Os::Windows, None) => var("LOCALAPPDATA")
+                .ok_or(PathsError::MissingVar("LOCALAPPDATA"))?
+                .join("Programs")
+                .join("R"),
+            _ => data.join("r"),
+        };
+        Ok(UserDirs { data, cache, r })
     }
 
-    /// R installations managed by rok: `<data>/r/<version>`.
+    /// Directories under one root, for tests: `<root>/data`, `<root>/cache`, `<root>/data/r`.
+    pub fn under(root: &std::path::Path) -> UserDirs {
+        UserDirs {
+            data: root.join("data"),
+            cache: root.join("cache"),
+            r: root.join("data").join("r"),
+        }
+    }
+
+    /// Where rok installs R ([`UserDirs::r`]).
     pub fn r_installs(&self) -> PathBuf {
-        self.data.join("r")
+        self.r.clone()
     }
 
     /// Cached data from P3M.
@@ -152,6 +175,20 @@ mod tests {
             win.cache,
             PathBuf::from("C:/Users/u/AppData/Local/R/cache/R/rok")
         );
+        assert_eq!(
+            win.r_installs(),
+            PathBuf::from("C:/Users/u/AppData/Local/Programs/R")
+        );
+        // Tests and benchmarks keep R under their own data directory.
+        let isolated = resolve(
+            Os::Windows,
+            &[
+                ("ROK_DATA_DIR", "D:/t/data"),
+                ("ROK_CACHE_DIR", "D:/t/cache"),
+            ],
+        )
+        .unwrap();
+        assert_eq!(isolated.r_installs(), PathBuf::from("D:/t/data/r"));
     }
 
     #[test]

@@ -15,6 +15,13 @@ fn rok(home: &Path, args: &[&str]) -> Output {
         .expect("rok runs")
 }
 
+/// Output with `/` between path parts and `\n` at line ends, as on Unix.
+fn unix_text(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes)
+        .replace('\\', "/")
+        .replace("\r\n", "\n")
+}
+
 fn json(out: &Output) -> serde_json::Value {
     assert!(
         out.status.success(),
@@ -167,7 +174,7 @@ fn runs_scripts_with_the_project_library() {
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
-    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stdout = unix_text(&out.stdout);
     assert!(stdout.contains("/.rok/library/R-"), "{stdout}");
     assert!(stdout.contains("--flag\nx"), "{stdout}");
 
@@ -227,13 +234,19 @@ fn activates_projects_at_r_startup() {
     let out = activate(&["--interactive"]);
     assert!(out.status.success());
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(stdout.starts_with("library=") && stdout.contains("/.rok/library/R-"));
+    assert!(stdout.starts_with("library=") && unix_text(&out.stdout).contains("/.rok/library/R-"));
     assert!(stdout.contains("\nhint_add=") && stdout.contains("\nhint_sync="));
     assert!(String::from_utf8_lossy(&out.stderr).contains("rok: proj (R "));
 
     // In R, an error about a package nothing handles gets the line; a handled one does not.
+    // R for Windows has no --interactive; its --ess implies it.
+    let interactive = if cfg!(windows) {
+        "--ess"
+    } else {
+        "--interactive"
+    };
     let r = Command::new("R")
-        .args(["-q", "--no-save", "--interactive"])
+        .args(["-q", "--no-save", interactive])
         .current_dir(&proj)
         .env("ROK_BINARY", env!("CARGO_BIN_EXE_rok"))
         .env("ROK_CACHE_DIR", home.join("cache"))
@@ -268,7 +281,7 @@ fn activates_projects_at_r_startup() {
         .strip_prefix("library=")
         .unwrap()
         .to_string();
-    std::fs::remove_file(std::path::Path::new(&lib).join("R6")).unwrap();
+    rok_core::fsutil::remove_link(&std::path::Path::new(&lib).join("R6")).unwrap();
     let out = activate(&[]);
     assert!(out.status.success());
     assert!(String::from_utf8_lossy(&out.stderr).contains("not synced"));
@@ -288,7 +301,7 @@ fn activates_projects_at_r_startup() {
         Some(0),
         "in sync: nothing to stop for"
     );
-    std::fs::remove_file(std::path::Path::new(&lib).join("R6")).unwrap();
+    rok_core::fsutil::remove_link(&std::path::Path::new(&lib).join("R6")).unwrap();
     assert_eq!(activate(&[]).status.code(), Some(3));
 }
 

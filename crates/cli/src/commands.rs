@@ -123,7 +123,7 @@ pub(crate) fn sync_library(
                 "Building needs tools that were not found: {}.",
                 missing.join(", ")
             ));
-            ui.bullet("On Debian or Ubuntu: sudo apt-get install -y build-essential");
+            ui.bullet(install::build_tools_advice(env.platform.os));
         }
         if !ui.confirm(
             "build-from-source",
@@ -246,9 +246,9 @@ pub fn init(
         bail!("{} is already a rok project.", dir.display());
     }
     std::fs::create_dir_all(&dir).with_context(|| format!("cannot create {}", dir.display()))?;
-    let dir = dir.canonicalize()?;
+    let dir = rok_core::fsutil::canonicalize(&dir)?;
     if std::env::home_dir()
-        .and_then(|h| h.canonicalize().ok())
+        .and_then(|h| rok_core::fsutil::canonicalize(&h).ok())
         .as_deref()
         == Some(dir.as_path())
         && !ui.confirm(

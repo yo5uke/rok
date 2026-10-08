@@ -2,22 +2,25 @@
 //!
 //! Each package is looked up in the global cache. A missing one is either downloaded as a P3M
 //! binary and extracted (no R involved), or built from CRAN's source with `R CMD INSTALL`. The
-//! project library then gets a symbolic link to each cached package. Everything that can fail
-//! slowly (downloads, builds) happens before the library is touched.
+//! project library then gets a link to each cached package (a symbolic link; a junction on
+//! Windows). Everything that can fail slowly (downloads, builds) happens before the library is
+//! touched.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use md5::Md5;
 use sha2::{Digest, Sha256};
 
 use crate::cache::{CacheError, PackageCache};
+use crate::fsutil;
 use crate::github::{self, GitHub, GitHubError};
 use crate::http::{Http, HttpError};
 use crate::lockfile::Remote;
-use crate::p3m::{P3m, P3mError};
+use crate::p3m::{Index, P3m, P3mError};
 use crate::par;
-use crate::platform::{Arch, Platform};
+use crate::platform::{Arch, Os, Platform};
 use crate::rdetect::RInstallation;
 use crate::repo::{self, RepoError, Repositories};
 use crate::resolve::Origin;
@@ -50,30 +53,39 @@ pub enum InstallError {
         version: Version,
         date: String,
     },
-    #[error(
-        "{name} {version}: the downloaded file's SHA-256 is {actual}, not the expected {expected}"
-    )]
-    ChecksumMismatch {
-        name: String,
-        version: Version,
-        expected: String,
-        actual: String,
-    },
+    #[error(transparent)]
+    ChecksumMismatch(Box<Mismatch>),
     #[error("{name} {version}: the source is not available from {from}")]
     SourceUnavailable {
         name: String,
         version: Version,
         from: String,
     },
-    #[error("failed to build {name} {version} from source{}; see {}", hint.as_ref().map(|h| format!(" ({h})")).unwrap_or_default(), log.display())]
-    Build {
-        name: String,
-        version: Version,
-        log: PathBuf,
-        hint: Option<String>,
-    },
-    #[error("linking packages into a project library is not supported on this OS yet")]
-    LinkUnsupported,
+    #[error(transparent)]
+    Build(Box<BuildFailure>),
+}
+
+/// A download whose checksum is not the expected one.
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "{name} {version}: the downloaded file's {algorithm} is {actual}, not the expected {expected}"
+)]
+pub struct Mismatch {
+    pub name: String,
+    pub version: Version,
+    pub algorithm: &'static str,
+    pub expected: String,
+    pub actual: String,
+}
+
+/// A package that failed to build from source.
+#[derive(Debug, thiserror::Error)]
+#[error("failed to build {name} {version} from source{}; see {}", hint.as_ref().map(|h| format!(" ({h})")).unwrap_or_default(), log.display())]
+pub struct BuildFailure {
+    pub name: String,
+    pub version: Version,
+    pub log: PathBuf,
+    pub hint: Option<String>,
 }
 
 fn io_err(path: &Path) -> impl FnOnce(std::io::Error) -> InstallError + '_ {
@@ -113,16 +125,25 @@ pub struct Context<'a> {
     pub jobs: usize,
 }
 
+/// What a download is checked against.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Checksum {
+    /// SHA-256: CRAN sources in rok.lock, and the indexes of R-multiverse and r-universe.
+    Sha256(String),
+    /// MD5: P3M's Windows index (`Hash`) and CRAN's (`MD5sum`).
+    Md5(String),
+}
+
 /// How a package will be made available.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Plan {
     /// Already in the cache.
     Cached(PathBuf),
-    /// A binary at `url`, cached under `key`, checked against `sha256` when the index has it.
+    /// A binary at `url`, cached under `key`, checked against `checksum` when the index has one.
     Binary {
         url: String,
         key: String,
-        sha256: Option<String>,
+        checksum: Option<Checksum>,
     },
     /// Must be built from source; `git` when the repository no longer has the release, so it
     /// is rebuilt from its Git origin.
@@ -152,16 +173,35 @@ fn short_hash(s: &str) -> String {
 }
 
 impl Context<'_> {
-    /// The cache key of P3M binaries for this R and platform (`4.6-noble`, `4.6-noble-arm64`),
-    /// matching P3M's `x-package-binary-tag`. `None` when P3M has no binaries for this machine.
+    /// The cache key of P3M binaries for this R and platform (`4.6-noble`, `4.6-noble-arm64`,
+    /// `4.6-win`), matching P3M's `x-package-binary-tag`. `None` when P3M has no binaries for
+    /// this machine.
     pub fn binary_key(&self) -> Option<String> {
-        let distro = self.platform.p3m_linux_name()?;
-        let arm = if self.platform.arch == Arch::Aarch64 {
-            "-arm64"
-        } else {
-            ""
-        };
-        Some(format!("{}-{distro}{arm}", self.r.version.minor()))
+        let minor = self.r.version.minor();
+        match (self.platform.os, self.platform.arch) {
+            (Os::Windows, Arch::X86_64) => Some(format!("{minor}-win")),
+            (Os::Linux, arch) => {
+                let distro = self.platform.p3m_linux_name()?;
+                let arm = if arch == Arch::Aarch64 { "-arm64" } else { "" };
+                Some(format!("{minor}-{distro}{arm}"))
+            }
+            _ => None,
+        }
+    }
+
+    /// Where another repository keeps binaries for this R and platform, if it can have any.
+    fn repo_binary_contrib(&self, url: &str) -> Option<String> {
+        let minor = self.r.version.minor();
+        match self.platform.os {
+            Os::Windows => Some(repo::windows_contrib(url, &minor)),
+            Os::Linux => Some(repo::linux_contrib(
+                url,
+                self.platform.p3m_linux_name()?,
+                self.platform.arch.r_name(),
+                &minor,
+            )),
+            Os::MacOs => None,
+        }
     }
 
     /// The cache key of binaries from another repository: the same package name and version
@@ -222,16 +262,47 @@ impl Context<'_> {
     }
 
     /// Decides how each package will be made available. Packages not in the cache are looked
-    /// up in parallel: on P3M, whose redirect says whether it has a binary for this R; in a
-    /// repository's Linux index (r-universe); GitHub packages are always built.
+    /// up in parallel: on P3M, whose redirect says whether it has a binary for this R (on
+    /// Windows, P3M's Windows index of the date says so, with the file's MD5); in a
+    /// repository's binary index (r-universe); GitHub packages are always built.
     pub fn assess(&self, wanted: &[Wanted]) -> Result<Vec<Plan>, InstallError> {
         let distro = self.platform.p3m_linux_name();
         let ua = self.platform.r_user_agent(&self.r.version);
+        let minor = self.r.version.minor();
+        let windows = self.platform.os == Os::Windows && self.binary_key().is_some();
+        // P3M's Windows index for each snapshot date that is needed, loaded once.
+        let mut windows_indexes: HashMap<&str, Index> = HashMap::new();
+        if windows {
+            for w in wanted {
+                if let Origin::Snapshot(date) = &w.origin
+                    && !windows_indexes.contains_key(date.as_str())
+                    && self.cached(w).is_none()
+                {
+                    windows_indexes.insert(date, self.p3m.windows_index(date, &minor)?);
+                }
+            }
+        }
         let results = par::map(wanted, self.jobs, |w| -> Result<Plan, InstallError> {
             if let Some(path) = self.cached(w) {
                 return Ok(Plan::Cached(path));
             }
             match &w.origin {
+                Origin::Snapshot(date) if windows => {
+                    let entry = windows_indexes
+                        .get(date.as_str())
+                        .and_then(|i| i.get(&w.name))
+                        .filter(|e| e.version == w.version);
+                    Ok(match entry {
+                        Some(e) => Plan::Binary {
+                            url: self
+                                .p3m
+                                .windows_package_url(date, &minor, &w.name, &w.version),
+                            key: self.binary_key().expect("checked above"),
+                            checksum: e.md5.clone().map(Checksum::Md5),
+                        },
+                        None => Plan::Source { git: false },
+                    })
+                }
                 Origin::Snapshot(_) if distro.is_none() => Ok(Plan::Source { git: false }),
                 Origin::Snapshot(date) => {
                     let distro = distro.expect("checked above");
@@ -251,7 +322,7 @@ impl Context<'_> {
                                 key: self
                                     .binary_key()
                                     .expect("P3M has binaries for this machine"),
-                                sha256: None,
+                                checksum: None,
                             })
                         }
                         200..=399 => Ok(Plan::Source { git: false }),
@@ -260,26 +331,31 @@ impl Context<'_> {
                 }
                 Origin::Repository { url, .. } => {
                     let rebuilt = w.remote.as_ref().is_some_and(|r| r.rebuilt);
-                    if !rebuilt && let Some(distro) = distro {
-                        let arch = self.platform.arch.r_name();
-                        let minor = self.r.version.minor();
-                        let index = self.repos.linux_index(url, distro, arch, &minor)?;
+                    if !rebuilt
+                        && let Some(contrib) = self.repo_binary_contrib(url)
+                        && let Some(key) = self.repo_binary_key(url)
+                    {
+                        let index = self.repos.binary_index(url, &contrib)?;
                         if let Some(e) = index
                             .as_ref()
                             .and_then(|i| repo::entry(i, &w.name, &w.version))
                             .filter(|e| e.built)
                         {
+                            let ext = if windows { "zip" } else { "tar.gz" };
                             return Ok(Plan::Binary {
                                 url: repo::file_url(
-                                    &repo::linux_contrib(url, distro, arch, &minor),
+                                    &contrib,
                                     &w.name,
                                     &w.version,
                                     e.path.as_deref(),
+                                    ext,
                                 ),
-                                key: self
-                                    .repo_binary_key(url)
-                                    .expect("P3M has binaries for this machine"),
-                                sha256: e.sha256.clone(),
+                                key,
+                                checksum: e
+                                    .sha256
+                                    .clone()
+                                    .map(Checksum::Sha256)
+                                    .or_else(|| e.md5.clone().map(Checksum::Md5)),
                             });
                         }
                     }
@@ -310,14 +386,14 @@ impl Context<'_> {
     /// Downloads and extracts binaries in parallel. Returns (name, cached path) pairs.
     pub fn fetch_binaries(
         &self,
-        items: &[(&Wanted, &str, &str, Option<&str>)],
+        items: &[(&Wanted, &str, &str, Option<&Checksum>)],
     ) -> Result<Vec<(String, PathBuf)>, InstallError> {
         let results = par::map(
             items,
             self.jobs,
-            |(w, url, key, sha256)| -> Result<(String, PathBuf), InstallError> {
+            |(w, url, key, checksum)| -> Result<(String, PathBuf), InstallError> {
                 let bytes = self.http.get_bytes(url, None)?;
-                check_sha256(w, &bytes, *sha256)?;
+                check_checksum(w, &bytes, *checksum)?;
                 let path = self.cache.insert_binary(&w.name, &w.version, key, &bytes)?;
                 Ok((w.name.clone(), path))
             },
@@ -389,6 +465,7 @@ impl Context<'_> {
                             &w.name,
                             &w.version,
                             e.path.as_deref(),
+                            "tar.gz",
                         );
                         let bytes = self.http.get_bytes(&file_url, None)?;
                         check_sha256(w, &bytes, e.sha256.as_deref())?;
@@ -563,7 +640,8 @@ impl Context<'_> {
             std::fs::create_dir_all(d).map_err(io_err(d))?;
         }
         for (name, path) in available {
-            symlink_dir(path, &deps.join(name))?;
+            let link = deps.join(name);
+            fsutil::link_dir(path, &link).map_err(io_err(&link))?;
         }
         let logs = self.cache.root().join(".logs");
         std::fs::create_dir_all(&logs).map_err(io_err(&logs))?;
@@ -591,12 +669,12 @@ impl Context<'_> {
             .map_err(io_err(&r))?;
         if !status.success() {
             let text = std::fs::read_to_string(&log).unwrap_or_default();
-            return Err(InstallError::Build {
+            return Err(InstallError::Build(Box::new(BuildFailure {
                 name: w.name.clone(),
                 version: w.version.clone(),
                 log,
                 hint: build_hint(&text),
-            });
+            })));
         }
         let key = if git {
             git_key(&self.build_key(w))
@@ -668,16 +746,23 @@ pub fn link(
     let mut report = LinkReport::default();
     for name in to_remove {
         let path = library.join(&name);
-        std::fs::remove_file(&path).map_err(io_err(&path))?;
+        fsutil::remove_link(&path).map_err(io_err(&path))?;
         report.removed.push(name);
     }
     for (name, target) in to_link {
         let path = library.join(&name);
         // Create the new link beside the old entry, then swap it in.
         let tmp = library.join(format!(".{name}.rok-tmp"));
-        let _ = std::fs::remove_file(&tmp);
-        symlink_dir(&target, &tmp)?;
-        if path.is_dir() && std::fs::read_link(&path).is_err() {
+        if fsutil::link_target(&tmp).is_some() {
+            let _ = fsutil::remove_link(&tmp);
+        }
+        fsutil::link_dir(&target, &tmp).map_err(io_err(&tmp))?;
+        if fsutil::link_target(&path).is_some() {
+            // Windows cannot rename onto an existing directory, which a junction is.
+            if cfg!(windows) {
+                fsutil::remove_link(&path).map_err(io_err(&path))?;
+            }
+        } else if path.is_dir() {
             std::fs::remove_dir_all(&path).map_err(io_err(&path))?;
         }
         std::fs::rename(&tmp, &path).map_err(io_err(&path))?;
@@ -727,7 +812,7 @@ fn link_plan(
         if wanted.contains_key(name.as_str()) || name.starts_with('.') || keep.contains(&name) {
             continue;
         }
-        let target = std::fs::read_link(entry.path()).ok();
+        let target = fsutil::link_target(&entry.path());
         if target.is_some_and(|t| t.starts_with(cache_root)) {
             to_remove.push(name);
         }
@@ -735,7 +820,7 @@ fn link_plan(
     let mut to_link: Vec<(String, PathBuf)> = packages
         .iter()
         .filter(|(name, target)| {
-            std::fs::read_link(library.join(name)).ok().as_deref() != Some(target.as_path())
+            fsutil::link_target(&library.join(name)).as_deref() != Some(target.as_path())
         })
         .cloned()
         .collect();
@@ -744,21 +829,17 @@ fn link_plan(
     Ok((to_link, to_remove))
 }
 
-fn symlink_dir(target: &Path, link: &Path) -> Result<(), InstallError> {
-    #[cfg(unix)]
-    {
-        std::os::unix::fs::symlink(target, link).map_err(io_err(link))
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = (target, link);
-        Err(InstallError::LinkUnsupported)
-    }
-}
-
-/// Which build tools configured in R (`CC`, `CXX`, `make`) are missing. Read from
-/// `R_HOME/etc/Makeconf` and `etc/Renviron` without running R (`R CMD config` needs make).
+/// Which build tools R needs are missing, read from R's configuration without running R: on
+/// Windows the Rtools that `etc/Rcmd_environ` names (V5), elsewhere the tools configured in
+/// `R_HOME/etc/Makeconf` (`CC`, `CXX`) and make (`R CMD config` needs make).
 pub fn missing_build_tools(r: &RInstallation) -> Vec<String> {
+    if let Some((name, dir)) = rtools(r) {
+        return if dir.join("usr/bin/make.exe").is_file() {
+            Vec::new()
+        } else {
+            vec![name]
+        };
+    }
     let makeconf = std::fs::read_to_string(r.r_home.join("etc/Makeconf")).unwrap_or_default();
     let var = |key: &str| {
         makeconf.lines().find_map(|l| {
@@ -775,6 +856,34 @@ pub fn missing_build_tools(r: &RInstallation) -> Vec<String> {
         .flatten()
         .filter(|cmd| !cmd.is_empty() && !on_path(cmd))
         .collect()
+}
+
+/// The Rtools a Windows R builds with: its name (`Rtools45`) and directory, from the line
+/// `R_RTOOLS45_PATH="${RTOOLS45_HOME:-c:/rtools45}/..."` of `etc/Rcmd_environ`. `None` for
+/// other R builds.
+fn rtools(r: &RInstallation) -> Option<(String, PathBuf)> {
+    let text = std::fs::read_to_string(r.r_home.join("etc/Rcmd_environ")).ok()?;
+    let line = text
+        .lines()
+        .map(str::trim_start)
+        .find(|l| l.starts_with("R_RTOOLS") && l.contains("_PATH="))?;
+    let (var, rest) = line.split_once("${")?.1.split_once(":-")?;
+    let default = rest.split('}').next()?;
+    let number = var.strip_prefix("RTOOLS")?.strip_suffix("_HOME")?;
+    let dir = std::env::var(var)
+        .ok()
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| default.to_string());
+    Some((format!("Rtools{number}"), PathBuf::from(dir)))
+}
+
+/// How to get the build tools on an OS.
+pub fn build_tools_advice(os: Os) -> &'static str {
+    match os {
+        Os::Windows => "Install Rtools from https://cran.r-project.org/bin/windows/Rtools/",
+        Os::MacOs => "Install Apple's command line tools: xcode-select --install",
+        Os::Linux => "On Debian or Ubuntu: sudo apt-get install -y build-essential",
+    }
 }
 
 fn on_path(cmd: &str) -> bool {
@@ -808,17 +917,32 @@ pub fn github_key_suffix(commit: &str) -> String {
 
 /// Checks a download against the expected SHA-256, if there is one.
 fn check_sha256(w: &Wanted, bytes: &[u8], expected: Option<&str>) -> Result<(), InstallError> {
-    let Some(expected) = expected else {
-        return Ok(());
+    check_checksum(
+        w,
+        bytes,
+        expected.map(|e| Checksum::Sha256(e.to_string())).as_ref(),
+    )
+}
+
+/// Checks a download against the expected checksum, if there is one.
+fn check_checksum(
+    w: &Wanted,
+    bytes: &[u8],
+    expected: Option<&Checksum>,
+) -> Result<(), InstallError> {
+    let (algorithm, expected, actual) = match expected {
+        None => return Ok(()),
+        Some(Checksum::Sha256(e)) => ("SHA-256", e, hex(&Sha256::digest(bytes))),
+        Some(Checksum::Md5(e)) => ("MD5", e, hex(&Md5::digest(bytes))),
     };
-    let actual = hex(&Sha256::digest(bytes));
     if actual != expected.to_ascii_lowercase() {
-        return Err(InstallError::ChecksumMismatch {
+        return Err(InstallError::ChecksumMismatch(Box::new(Mismatch {
             name: w.name.clone(),
             version: w.version.clone(),
-            expected: expected.to_string(),
+            algorithm,
+            expected: expected.clone(),
             actual,
-        });
+        })));
     }
     Ok(())
 }
@@ -858,6 +982,30 @@ mod tests {
     }
 
     #[test]
+    fn reads_the_rtools_of_windows_builds_of_r() {
+        let t = tempfile::tempdir().unwrap();
+        let r = RInstallation {
+            version: "4.6.1".parse().unwrap(),
+            r_home: t.path().to_path_buf(),
+            executable: t.path().join("bin/R.exe"),
+            kind: crate::rdetect::RKind::Managed,
+        };
+        assert_eq!(rtools(&r), None, "not a Windows build");
+        std::fs::create_dir_all(t.path().join("etc")).unwrap();
+        std::fs::write(
+            t.path().join("etc/Rcmd_environ"),
+            "# INSTALLER-BUILD-aarch64:R_RTOOLS45_PATH=\"${RTOOLS45_AARCH64_HOME:-c:/rtools45-aarch64}/usr/bin\"\n\
+             R_RTOOLS45_PATH=\"${RTOOLS99_HOME:-c:/no/rtools45}/x86_64-w64-mingw32.static.posix/bin;${RTOOLS45_HOME:-c:/rtools45}/usr/bin\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            rtools(&r),
+            Some(("Rtools99".to_string(), PathBuf::from("c:/no/rtools45")))
+        );
+        assert_eq!(missing_build_tools(&r), ["Rtools99"]);
+    }
+
+    #[test]
     fn finds_build_hints() {
         let log = "* installing *source* package 'xml2' ...\nfoo.c:1:10: fatal error: libxml/xmlversion.h: No such file or directory\n";
         assert_eq!(
@@ -871,11 +1019,10 @@ mod tests {
         assert_eq!(build_hint("* DONE (cli)"), None);
     }
 
-    #[cfg(unix)]
     #[test]
     fn links_only_what_is_wanted_and_leaves_user_packages() {
         let t = tempfile::tempdir().unwrap();
-        let cache = t.path().join("cache");
+        let cache = fsutil::canonicalize(t.path()).unwrap().join("cache");
         let lib = t.path().join("lib");
         let mk = |p: &Path| std::fs::create_dir_all(p).unwrap();
         let (a1, a2, b, old) = (
@@ -925,7 +1072,7 @@ mod tests {
                 removed: vec!["old".into()]
             }
         );
-        assert_eq!(std::fs::read_link(lib.join("a")).unwrap(), a2);
+        assert_eq!(fsutil::link_target(&lib.join("a")).unwrap(), a2);
         assert!(lib.join("userpkg").is_dir());
         // Nothing to do the second time.
         assert_eq!(
@@ -955,10 +1102,7 @@ mod tests {
             executable: PathBuf::from("/r/bin/R"),
             kind: crate::rdetect::RKind::Managed,
         };
-        let dirs = crate::paths::UserDirs {
-            data: "/d".into(),
-            cache: "/c".into(),
-        };
+        let dirs = crate::paths::UserDirs::under(Path::new("/x"));
         let (http, cache) = (Http::new(), PackageCache::new(&dirs));
         let p3m = P3m::new(crate::p3m::DEFAULT_URL, http.clone(), &dirs);
         let ctx = Context {

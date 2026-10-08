@@ -79,26 +79,22 @@ impl PackageCache {
             .map_err(io_err(&tmp))
     }
 
-    /// Extracts a binary package (`.tar.gz`) into the cache and returns its directory. The
-    /// archive must contain `<name>/DESCRIPTION` with the expected name and version, and a
-    /// `Built` field (which source packages lack).
+    /// Extracts a binary package (`.tar.gz`, or `.zip` on Windows) into the cache and returns
+    /// its directory. The archive must contain `<name>/DESCRIPTION` with the expected name and
+    /// version, and a `Built` field (which source packages lack).
     pub fn insert_binary(
         &self,
         name: &str,
         version: &Version,
         key: &str,
-        tar_gz: &[u8],
+        archive: &[u8],
     ) -> Result<PathBuf, CacheError> {
         let tmp = self.temp_dir()?;
-        let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(tar_gz));
-        // `unpack` refuses entries that would land outside the target directory.
-        archive
-            .unpack(tmp.path())
-            .map_err(|e| CacheError::BadPackage {
-                name: name.to_string(),
-                version: version.to_string(),
-                reason: format!("cannot extract the archive ({e})"),
-            })?;
+        crate::archive::unpack(archive, tmp.path()).map_err(|e| CacheError::BadPackage {
+            name: name.to_string(),
+            version: version.to_string(),
+            reason: format!("cannot extract the archive ({e})"),
+        })?;
         let built = check_package(&tmp.path().join(name), name, version)?;
         if !built {
             return Err(CacheError::BadPackage {
@@ -186,10 +182,7 @@ mod tests {
     }
 
     fn cache(t: &tempfile::TempDir) -> PackageCache {
-        PackageCache::new(&UserDirs {
-            data: t.path().join("data"),
-            cache: t.path().join("cache"),
-        })
+        PackageCache::new(&UserDirs::under(t.path()))
     }
 
     #[test]

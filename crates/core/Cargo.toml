@@ -20,3 +20,8 @@ pubgrub.workspace = true
 tar.workspace = true
 sha2.workspace = true
 tempfile.workspace = true
+zip.workspace = true
+md-5.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+junction.workspace = true

@@ -191,6 +191,20 @@ impl P3m {
         )
     }
 
+    /// The URL of a Windows binary for R `r_minor` (`4.6`), as listed in [`P3m::windows_index`].
+    pub fn windows_package_url(
+        &self,
+        date: &str,
+        r_minor: &str,
+        name: &str,
+        version: &Version,
+    ) -> String {
+        format!(
+            "{}/bin/windows/contrib/{r_minor}/{name}_{version}.zip",
+            self.cran_url(date)
+        )
+    }
+
     /// The URL of a package's source as P3M serves it (with `Repository: RSPM` added, so it
     /// is not byte-identical to CRAN's file).
     pub fn source_url(&self, date: &str, name: &str, version: &Version) -> String {
@@ -432,6 +446,42 @@ impl P3m {
     }
 }
 
+impl P3m {
+    /// The Windows binaries of a snapshot date for R `r_minor`, with each file's MD5 (`Hash`;
+    /// V2). Downloaded once and then read from the cache. Empty if P3M has none for that date.
+    pub fn windows_index(&self, date: &str, r_minor: &str) -> Result<Index, P3mError> {
+        if !date::is_valid(date) {
+            return Err(SnapshotError::InvalidDate(date.to_string()).into());
+        }
+        let path = self
+            .cache
+            .join("cran")
+            .join(date)
+            .join(format!("windows-{r_minor}"))
+            .join("PACKAGES.gz");
+        let label = format!("{date} (Windows, R {r_minor})");
+        if let Ok(gz) = std::fs::read(&path) {
+            let text = gunzip(&gz).map_err(|message| P3mError::Response {
+                url: path.display().to_string(),
+                message,
+            })?;
+            return Ok(Index::parse(&label, &text));
+        }
+        let url = format!(
+            "{}/bin/windows/contrib/{r_minor}/PACKAGES.gz",
+            self.cran_url(date)
+        );
+        let bytes = match self.http.get_bytes(&url, None) {
+            Ok(b) => b,
+            Err(HttpError::Status { status: 404, .. }) => return Ok(Index::parse(&label, "")),
+            Err(e) => return Err(e.into()),
+        };
+        let text = gunzip(&bytes).map_err(|message| P3mError::Response { url, message })?;
+        write_atomic(&path, &bytes)?;
+        Ok(Index::parse(&label, &text))
+    }
+}
+
 fn read_dates(path: &Path) -> Option<(Vec<String>, Duration)> {
     let body = std::fs::read(path).ok()?;
     let age = std::fs::metadata(path)
@@ -489,6 +539,8 @@ pub struct IndexEntry {
     pub os_type: Option<String>,
     /// `SHA256` of the file, in indexes that have it (R-multiverse, r-universe).
     pub sha256: Option<String>,
+    /// MD5 of the file: `Hash` in P3M's Windows and macOS indexes, `MD5sum` in CRAN's.
+    pub md5: Option<String>,
     /// `Path`: where the file is, relative to the index (r-universe uses it for every package).
     pub path: Option<String>,
     /// Whether the index lists a binary (it has a `Built` field).
@@ -603,6 +655,11 @@ fn entry_from_record(rec: &dcf::Record) -> Result<IndexEntry, String> {
         sha256: rec
             .get("SHA256")
             .filter(|h| h.len() == 64)
+            .map(str::to_ascii_lowercase),
+        md5: rec
+            .get("Hash")
+            .or_else(|| rec.get("MD5sum"))
+            .filter(|h| h.len() == 32)
             .map(str::to_ascii_lowercase),
         path: rec.get("Path").map(str::to_string),
         built: rec.get("Built").is_some(),
@@ -731,10 +788,7 @@ Version: one
     #[test]
     fn reads_index_from_cache_without_network() {
         let t = tempfile::tempdir().unwrap();
-        let dirs = UserDirs {
-            data: t.path().join("data"),
-            cache: t.path().join("cache"),
-        };
+        let dirs = UserDirs::under(t.path());
         // An unreachable server: only the cache can answer.
         let p3m = P3m::new("http://127.0.0.1:9", Http::new(), &dirs);
         let path = dirs
@@ -760,10 +814,7 @@ Version: one
     #[test]
     fn falls_back_to_cached_dates_when_offline() {
         let t = tempfile::tempdir().unwrap();
-        let dirs = UserDirs {
-            data: t.path().join("data"),
-            cache: t.path().join("cache"),
-        };
+        let dirs = UserDirs::under(t.path());
         let p3m = P3m::new("http://127.0.0.1:9/", Http::new(), &dirs);
         assert!(p3m.snapshot_dates(None).is_err());
         let path = dirs.p3m_cache().join("127.0.0.1_9/transaction-dates.json");

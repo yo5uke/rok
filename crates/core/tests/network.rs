@@ -11,10 +11,7 @@ use rok_core::rdetect;
 
 fn temp_dirs() -> (tempfile::TempDir, UserDirs) {
     let t = tempfile::tempdir().unwrap();
-    let dirs = UserDirs {
-        data: t.path().join("data"),
-        cache: t.path().join("cache"),
-    };
+    let dirs = UserDirs::under(t.path());
     (t, dirs)
 }
 

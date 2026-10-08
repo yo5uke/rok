@@ -57,16 +57,10 @@ impl<'a> Repositories<'a> {
             .ok_or_else(|| RepoError::BadIndex { url: contrib })
     }
 
-    /// The Linux binary index for a distribution (`noble`), arch (`x86_64`) and R minor
-    /// version, or `None` if the repository has none.
-    pub fn linux_index(
-        &self,
-        url: &str,
-        distro: &str,
-        arch: &str,
-        r_minor: &str,
-    ) -> Result<Option<Arc<Index>>, RepoError> {
-        self.index(&linux_contrib(url, distro, arch, r_minor), url)
+    /// The binary index in `contrib` ([`linux_contrib`] or [`windows_contrib`] of `url`), or
+    /// `None` if the repository has none.
+    pub fn binary_index(&self, url: &str, contrib: &str) -> Result<Option<Arc<Index>>, RepoError> {
+        self.index(contrib, url)
     }
 
     fn index(&self, contrib: &str, label: &str) -> Result<Option<Arc<Index>>, RepoError> {
@@ -117,12 +111,24 @@ pub fn linux_contrib(url: &str, distro: &str, arch: &str, r_minor: &str) -> Stri
     format!("{url}/bin/linux/{distro}-{arch}/{r_minor}/src/contrib")
 }
 
-/// The URL of a package file in a `contrib` directory, honouring the index's `Path`
-/// (`<contrib>/<Path>/<name>_<version>.tar.gz`, as R builds it).
-pub fn file_url(contrib: &str, name: &str, version: &Version, path: Option<&str>) -> String {
+/// `<url>/bin/windows/contrib/<minor>` (CRAN's layout, which r-universe follows).
+pub fn windows_contrib(url: &str, r_minor: &str) -> String {
+    format!("{url}/bin/windows/contrib/{r_minor}")
+}
+
+/// The URL of a package file (`ext`: `tar.gz`, or `zip` for Windows binaries) in a `contrib`
+/// directory, honouring the index's `Path` (`<contrib>/<Path>/<name>_<version>.<ext>`, as R
+/// builds it).
+pub fn file_url(
+    contrib: &str,
+    name: &str,
+    version: &Version,
+    path: Option<&str>,
+    ext: &str,
+) -> String {
     match path {
-        Some(p) => format!("{contrib}/{p}/{name}_{version}.tar.gz"),
-        None => format!("{contrib}/{name}_{version}.tar.gz"),
+        Some(p) => format!("{contrib}/{p}/{name}_{version}.{ext}"),
+        None => format!("{contrib}/{name}_{version}.{ext}"),
     }
 }
 
@@ -169,7 +175,7 @@ mod tests {
         let v: Version = "1.16.0".parse().unwrap();
         let contrib = "https://community.r-multiverse.org/src/contrib";
         assert_eq!(
-            file_url(contrib, "polars", &v, None),
+            file_url(contrib, "polars", &v, None, "tar.gz"),
             format!("{contrib}/polars_1.16.0.tar.gz")
         );
         assert_eq!(
@@ -177,13 +183,18 @@ mod tests {
                 contrib,
                 "polars",
                 &v,
-                Some("polars_1.16.0.tar.gz?sha256=ab&file=")
+                Some("polars_1.16.0.tar.gz?sha256=ab&file="),
+                "tar.gz"
             ),
             format!("{contrib}/polars_1.16.0.tar.gz?sha256=ab&file=/polars_1.16.0.tar.gz")
         );
         assert_eq!(
             linux_contrib("https://x.r-universe.dev", "noble", "x86_64", "4.6"),
             "https://x.r-universe.dev/bin/linux/noble-x86_64/4.6/src/contrib"
+        );
+        assert_eq!(
+            windows_contrib("https://x.r-universe.dev", "4.6"),
+            "https://x.r-universe.dev/bin/windows/contrib/4.6"
         );
         assert_eq!(
             cache_name("https://production.r-multiverse.org/2026-09-15/src/contrib"),

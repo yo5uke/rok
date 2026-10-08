@@ -2,7 +2,7 @@
 //! binaries of the locked packages for the new R, and the candidates when some are missing.
 //!
 //! Whether P3M has a binary depends on the package version, the R minor version and the
-//! distribution, not on the snapshot date (V4). Answers are therefore cached forever, and a
+//! distribution (or Windows), not on the snapshot date (V4). Answers are therefore cached forever, and a
 //! search asks P3M only about versions it has not seen. One operation sends at most
 //! [`MAX_REQUESTS`] requests, 16 at a time.
 
@@ -14,6 +14,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use crate::lockfile::Lockfile;
 use crate::ops::Env;
 use crate::par;
+use crate::platform::{Arch, Os};
 use crate::resolve::release_snapshots;
 use crate::version::Version;
 
@@ -36,10 +37,12 @@ pub enum PinError {
 pub type Item = (String, Version, String);
 
 /// Answers whether P3M has a binary of a package version for one R minor version on this
-/// machine's distribution.
+/// machine's distribution, or on Windows.
 pub struct BinaryChecker<'a> {
     env: &'a Env,
-    distro: &'static str,
+    /// P3M's name of the Linux distribution; `None` on Windows.
+    distro: Option<&'static str>,
+    r_minor: String,
     user_agent: String,
     path: PathBuf,
     known: Mutex<BTreeMap<String, bool>>,
@@ -49,9 +52,13 @@ pub struct BinaryChecker<'a> {
 impl<'a> BinaryChecker<'a> {
     /// `None` where P3M builds no binaries for this machine.
     pub fn new(env: &'a Env, r_version: &Version) -> Option<BinaryChecker<'a>> {
-        let distro = env.platform.p3m_linux_name()?;
+        let distro = match (env.platform.os, env.platform.arch) {
+            (Os::Windows, Arch::X86_64) => None,
+            _ => Some(env.platform.p3m_linux_name()?),
+        };
         let path = env.p3m.cache_dir().join("binaries").join(format!(
-            "{distro}-{}-R{}.json",
+            "{}-{}-R{}.json",
+            distro.unwrap_or("windows"),
             env.platform.arch.r_name(),
             r_version.minor()
         ));
@@ -62,6 +69,7 @@ impl<'a> BinaryChecker<'a> {
         Some(BinaryChecker {
             env,
             distro,
+            r_minor: r_version.minor(),
             user_agent: env.platform.r_user_agent(r_version),
             path,
             known: Mutex::new(known),
@@ -90,10 +98,21 @@ impl<'a> BinaryChecker<'a> {
         }
         let answers = par::map(&unknown, self.env.jobs, |(n, v, date)| {
             self.sent.fetch_add(1, Ordering::Relaxed);
-            let url = self.env.p3m.linux_package_url(self.distro, date, n, v);
+            // On Linux P3M picks the binary for the R in the User-Agent; Windows binaries have
+            // their own URLs (404 when there is none).
+            let (url, user_agent) = match self.distro {
+                Some(d) => (
+                    self.env.p3m.linux_package_url(d, date, n, v),
+                    Some(self.user_agent.as_str()),
+                ),
+                None => (
+                    self.env.p3m.windows_package_url(date, &self.r_minor, n, v),
+                    None,
+                ),
+            };
             self.env
                 .http
-                .get_headers(&url, Some(&self.user_agent))
+                .get_headers(&url, user_agent)
                 .map(|h| match h.status {
                     200..=399 => Some(h.header("x-package-type") == Some("binary")),
                     // Not in that snapshot: no answer to remember.

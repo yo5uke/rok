@@ -56,7 +56,7 @@ pub fn activate(
     let r = RInstallation {
         version,
         r_home: r_home.to_path_buf(),
-        executable: r_home.join("bin").join("R"),
+        executable: r_home.join("bin").join(rdetect::exe_name("R")),
         kind: RKind::Path,
     };
     // A newer rok may have a newer hook; it takes effect at the next start.
@@ -212,8 +212,9 @@ pub fn activate(
             let missing = install::missing_build_tools(&r);
             if !missing.is_empty() {
                 ui.bullet(&format!(
-                    "Building needs tools that were not found: {}. On Debian or Ubuntu: sudo apt-get install -y build-essential",
-                    missing.join(", ")
+                    "Building needs tools that were not found: {}. {}",
+                    missing.join(", "),
+                    install::build_tools_advice(env.platform.os)
                 ));
             }
             return ask(

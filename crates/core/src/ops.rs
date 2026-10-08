@@ -907,8 +907,8 @@ pub fn execute_sync(
             Plan::Cached(path) => {
                 paths.insert(w.name.clone(), path.clone());
             }
-            Plan::Binary { url, key, sha256 } => {
-                binaries.push((w, url.as_str(), key.as_str(), sha256.as_deref()))
+            Plan::Binary { url, key, checksum } => {
+                binaries.push((w, url.as_str(), key.as_str(), checksum.as_ref()))
             }
             Plan::Source { .. } => {}
         }

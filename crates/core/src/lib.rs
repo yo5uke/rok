@@ -1,6 +1,7 @@
 //! Core of rok: versions and constraints, DESCRIPTION/PACKAGES parsing, the manifest and
 //! lockfile formats, the machine and its R installations, and P3M.
 
+pub mod archive;
 pub mod cache;
 pub mod constraint;
 pub mod date;

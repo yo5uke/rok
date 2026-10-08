@@ -33,7 +33,11 @@ pub enum Strategy {
 fn home_relative(path: &Path) -> String {
     match std::env::home_dir() {
         Some(home) if path.starts_with(&home) => {
-            format!("~/{}", path.strip_prefix(&home).unwrap_or(path).display())
+            format!(
+                "~{}{}",
+                std::path::MAIN_SEPARATOR,
+                path.strip_prefix(&home).unwrap_or(path).display()
+            )
         }
         _ => path.display().to_string(),
     }
@@ -94,12 +98,7 @@ pub(crate) fn install_r(
     let r = installed.installation;
     ui.success(&format!(
         "Installed R {version} at {} ({}) in {:.1}s",
-        home_relative(
-            r.r_home
-                .parent()
-                .and_then(Path::parent)
-                .unwrap_or(&r.r_home)
-        ),
+        home_relative(&rinstall::install_dir(&env.dirs, version)),
         installed.build,
         start.elapsed().as_secs_f64()
     ));
@@ -154,14 +153,14 @@ pub fn list(ui: &Ui, project_dir: Option<&Path>, all: bool) -> anyhow::Result<()
         }
     }
     let available = releases(ui, &env)?;
+    let buildable = available
+        .iter()
+        .filter(|v| rinstall::is_built_for(&env.platform, v));
     let shown: Vec<&Version> = if all {
-        available.iter().collect()
+        buildable.collect()
     } else {
         let mut seen = std::collections::HashSet::new();
-        available
-            .iter()
-            .filter(|v| seen.insert(v.minor()))
-            .collect()
+        buildable.filter(|v| seen.insert(v.minor())).collect()
     };
     ui.line_plain(if all {
         "Available to install:"
@@ -175,6 +174,12 @@ pub fn list(ui: &Ui, project_dir: Option<&Path>, all: bool) -> anyhow::Result<()
                 .map(|v| v.to_string())
                 .collect::<Vec<_>>()
                 .join(", ")
+        ));
+    }
+    if env.platform.os == rok_core::platform::Os::Windows {
+        ui.info(&format!(
+            "Older versions have no build rok can install; install them with CRAN's installer ({}), and rok finds them.",
+            rinstall::WINDOWS_OLD_RELEASES
         ));
     }
     ui.result(json!({
@@ -278,7 +283,7 @@ pub fn uninstall(ui: &Ui, version: &str) -> anyhow::Result<()> {
     };
     let env = Env::from_env()?;
     let dir = rinstall::install_dir(&env.dirs, &version);
-    if !dir.is_dir() {
+    if !rinstall::is_managed(&env.dirs, &version) {
         let other = env
             .r_installations()
             .into_iter()

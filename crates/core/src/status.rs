@@ -84,9 +84,7 @@ pub fn read_library(library: &Path, cache_root: &Path) -> BTreeMap<String, Insta
                     .and_then(|r| r.get("Version"))
                     .and_then(|v| v.parse().ok())
             });
-        let target = std::fs::read_link(&path)
-            .ok()
-            .filter(|t| t.starts_with(cache_root));
+        let target = crate::fsutil::link_target(&path).filter(|t| t.starts_with(cache_root));
         out.insert(
             name,
             match target {
@@ -804,17 +802,21 @@ mod tests {
         ));
     }
 
-    #[cfg(unix)]
     #[test]
     fn reads_library_entries() {
         let t = tempfile::tempdir().unwrap();
-        let (cache, lib) = (t.path().join("cache"), t.path().join("lib"));
+        let root = crate::fsutil::canonicalize(t.path()).unwrap();
+        let (cache, lib) = (root.join("cache"), root.join("lib"));
         let pkg = cache.join("R6/2.6.1/k/R6");
         std::fs::create_dir_all(&pkg).unwrap();
         std::fs::write(pkg.join("DESCRIPTION"), "Package: R6\nVersion: 2.6.1\n").unwrap();
         std::fs::create_dir_all(lib.join("mine")).unwrap();
-        std::os::unix::fs::symlink(&pkg, lib.join("R6")).unwrap();
-        std::os::unix::fs::symlink(cache.join("gone/1/k/gone"), lib.join("gone")).unwrap();
+        crate::fsutil::link_dir(&pkg, &lib.join("R6")).unwrap();
+        // A link whose cached package was removed.
+        let gone = cache.join("gone/1/k/gone");
+        std::fs::create_dir_all(&gone).unwrap();
+        crate::fsutil::link_dir(&gone, &lib.join("gone")).unwrap();
+        std::fs::remove_dir(&gone).unwrap();
         let entries = read_library(&lib, &cache);
         assert_eq!(
             entries["R6"],

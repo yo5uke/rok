@@ -3,7 +3,9 @@
 //! R comes from Posit's builds. On Linux the portable build (`manylinux_2_34`: it bundles its
 //! libraries and runs wherever it is unpacked, on glibc 2.34 or later) comes first. Where it
 //! cannot be used, the build for the distribution is unpacked and the paths compiled into it
-//! are rewritten. Nothing needs administrator rights; rok installs into `<data>/r/<version>`.
+//! are rewritten. On Windows the portable build (a `.zip`) is unpacked; no installer runs and
+//! nothing is written to the registry (V5). Nothing needs administrator rights; rok installs
+//! into `<data>/r/<version>`, or on Windows `%LOCALAPPDATA%/Programs/R/R-<version>`.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -222,8 +224,15 @@ pub fn builds(
     glibc: Option<(u32, u32)>,
     version: &Version,
 ) -> Result<Vec<Build>, RInstallError> {
-    if platform.os != Os::Linux {
-        return Err(RInstallError::Unsupported(format!("{:?}", platform.os)));
+    match (platform.os, platform.arch) {
+        (Os::Linux, _) => {}
+        (Os::Windows, Arch::X86_64) => {
+            return Ok(vec![Build {
+                kind: BuildKind::Portable,
+                url: format!("{BUILDS_URL}/windows/R-{version}-windows.zip"),
+            }]);
+        }
+        _ => return Err(RInstallError::Unsupported(platform.to_string())),
     }
     let arm = if platform.arch == Arch::Aarch64 {
         "-arm64"
@@ -282,9 +291,43 @@ pub struct Installed {
     pub build: BuildKind,
 }
 
-/// The directory of a managed R version.
+/// The directory of a managed R version: `<version>`, or on Windows `R-<version>` as CRAN's
+/// installer names it.
 pub fn install_dir(dirs: &UserDirs, version: &Version) -> PathBuf {
-    dirs.r_installs().join(version.as_str())
+    if cfg!(windows) {
+        dirs.r_installs().join(format!("R-{version}"))
+    } else {
+        dirs.r_installs().join(version.as_str())
+    }
+}
+
+/// Whether rok installed R `version` (on Windows, R installed by CRAN's installer may sit in
+/// the same directory).
+pub fn is_managed(dirs: &UserDirs, version: &Version) -> bool {
+    let dir = install_dir(dirs, version);
+    dir.join("bin").is_dir() && (!cfg!(windows) || dir.join(rdetect::MANAGED_MARK).is_file())
+}
+
+/// CRAN's installers of past R releases for Windows.
+pub const WINDOWS_OLD_RELEASES: &str = "https://cloud.r-project.org/bin/windows/base/old/";
+
+/// Where to get R `version` by hand on Windows when Posit has no portable build of it.
+fn windows_installer_advice(version: &Version) -> String {
+    format!(
+        "  • Install it with CRAN's installer from {WINDOWS_OLD_RELEASES}{version}/; rok then finds it"
+    )
+}
+
+/// Whether Posit builds R `version` for this machine. On Windows, only R 3.6.3 and 4.1.0 or
+/// later have portable builds (V5); elsewhere the release list does not tell, so all count.
+pub fn is_built_for(platform: &Platform, version: &Version) -> bool {
+    match platform.os {
+        Os::Windows => {
+            let part = |i: usize| version.parts().get(i).copied().unwrap_or(0);
+            version.as_str() == "3.6.3" || (part(0), part(1)) >= (4, 1)
+        }
+        _ => true,
+    }
 }
 
 /// Installs R `version` into `<data>/r/<version>`. `progress` receives one line per step.
@@ -315,7 +358,9 @@ pub fn install(
         }
     }
     let Some(build) = chosen else {
-        if reasons.is_empty() {
+        if platform.os == Os::Windows {
+            reasons.push(windows_installer_advice(version));
+        } else if reasons.is_empty() {
             reasons
                 .push("  • no Posit build fits this Linux distribution and C library".to_string());
         }
@@ -328,7 +373,7 @@ pub fn install(
     install_build(http, dirs, &build, version, progress)
 }
 
-/// Installs one particular build of R `version` into `<data>/r/<version>`.
+/// Installs one particular build of R `version` into [`install_dir`].
 pub fn install_build(
     http: &Http,
     dirs: &UserDirs,
@@ -350,28 +395,53 @@ pub fn install_build(
         .prefix(".install-")
         .tempdir_in(&root)
         .map_err(io_err(&root))?;
-    let tarball = work.path().join("R.tar.gz");
+    let zip = build.url.ends_with(".zip");
+    let archive = work.path().join(if zip { "R.zip" } else { "R.tar.gz" });
     progress(&format!("Downloading R {version} ({})", build.kind));
-    http.download(&build.url, &tarball)?;
+    http.download(&build.url, &archive)?;
     progress(&format!("Unpacking R {version}"));
     let unpack = work.path().join("unpack");
-    let file = std::fs::File::open(&tarball).map_err(io_err(&tarball))?;
-    tar::Archive::new(flate2::read::GzDecoder::new(file))
-        .unpack(&unpack)
-        .map_err(io_err(&unpack))?;
-    let top = unpack.join(version.as_str());
-    if !top.join("bin").join("R").is_file() {
+    let file = std::fs::File::open(&archive).map_err(io_err(&archive))?;
+    if zip {
+        rok_core::archive::unzip(std::io::BufReader::new(file), &unpack).map_err(|message| {
+            RInstallError::Broken {
+                version: version.clone(),
+                message: format!("cannot unpack {} ({message})", build.url),
+            }
+        })?;
+    } else {
+        tar::Archive::new(flate2::read::GzDecoder::new(file))
+            .unpack(&unpack)
+            .map_err(io_err(&unpack))?;
+    }
+    // Windows builds unpack to `R-<version>/` with R_HOME at the top, others to `<version>/`
+    // with R_HOME at `lib/R`.
+    let (top, exe) = if zip {
+        (unpack.join(format!("R-{version}")), "bin/R.exe")
+    } else {
+        (unpack.join(version.as_str()), "bin/R")
+    };
+    if !top.join(exe).is_file() {
         return Err(RInstallError::Broken {
             version: version.clone(),
-            message: format!("{} has no {version}/bin/R", build.url),
+            message: format!("{} has no {exe}", build.url),
         });
     }
     if let BuildKind::Distribution(_) = &build.kind {
         relocate(&top, &format!("/opt/R/{version}"), &target)?;
     }
+    if cfg!(windows) {
+        let mark = top.join(rdetect::MANAGED_MARK);
+        std::fs::write(&mark, format!("Installed by rok from {}\n", build.url))
+            .map_err(io_err(&mark))?;
+    }
     std::fs::rename(&top, &target).map_err(io_err(&target))?;
 
-    let r_home = target.join("lib").join("R");
+    let r_home = if zip {
+        target.clone()
+    } else {
+        target.join("lib").join("R")
+    };
     match rdetect::r_home_version(&r_home) {
         Some(v) if v == *version => {}
         found => {
@@ -385,7 +455,7 @@ pub fn install_build(
     Ok(Installed {
         installation: RInstallation {
             version: version.clone(),
-            executable: target.join("bin").join("R"),
+            executable: target.join(exe),
             r_home,
             kind: RKind::Managed,
         },
@@ -436,7 +506,7 @@ pub fn relocate(dir: &Path, from: &str, to: &Path) -> Result<(), RInstallError> 
 /// Removes an R installed by rok.
 pub fn uninstall(dirs: &UserDirs, version: &Version) -> Result<PathBuf, RInstallError> {
     let target = install_dir(dirs, version);
-    if !target.join("bin").is_dir() {
+    if !is_managed(dirs, version) {
         return Err(RInstallError::NotManaged {
             version: version.clone(),
         });
@@ -525,6 +595,38 @@ mod tests {
     }
 
     #[test]
+    fn chooses_windows_builds() {
+        let windows = Platform {
+            os: Os::Windows,
+            arch: Arch::X86_64,
+            distro: None,
+        };
+        let b = builds(&windows, None, &v("4.5.3")).unwrap();
+        assert_eq!(b.len(), 1);
+        assert_eq!(b[0].kind, BuildKind::Portable);
+        assert_eq!(
+            b[0].url,
+            "https://cdn.posit.co/r/windows/R-4.5.3-windows.zip"
+        );
+        let arm = Platform {
+            arch: Arch::Aarch64,
+            ..windows.clone()
+        };
+        assert!(builds(&arm, None, &v("4.5.3")).is_err());
+        assert!(windows_installer_advice(&v("4.0.5")).contains("/base/old/4.0.5/"));
+        for (version, built) in [
+            ("4.6.1", true),
+            ("4.1.0", true),
+            ("4.0.5", false),
+            ("3.6.3", true),
+            ("3.6.2", false),
+            ("5.0.0", true),
+        ] {
+            assert_eq!(is_built_for(&windows, &v(version)), built, "{version}");
+        }
+    }
+
+    #[test]
     fn shows_system_install_commands() {
         let noble = platform(
             "ID=ubuntu\nID_LIKE=debian\nVERSION_ID=\"24.04\"\n",
@@ -556,10 +658,7 @@ mod tests {
             return;
         };
         let t = tempfile::tempdir().unwrap();
-        let dirs = UserDirs {
-            data: t.path().join("data"),
-            cache: t.path().join("cache"),
-        };
+        let dirs = UserDirs::under(t.path());
         let version = v("4.4.2");
         let build = builds(&platform, None, &version).unwrap().remove(0);
         assert_eq!(build.kind, BuildKind::Distribution(name));
