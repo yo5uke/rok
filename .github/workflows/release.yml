@@ -1,0 +1,106 @@
+name: Release
+
+# A tag `v<version>` publishes a release: the binary for each target (`rok-<target>.tar.gz`,
+# with its `.sha256`) and the R package's source (`rok_<version>.tar.gz`). Run by hand, it only
+# builds the files (a dry run).
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  versions:
+    name: Check versions
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - uses: actions/checkout@v5
+      - id: v
+        shell: bash
+        run: |
+          cargo=$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"/\1/p' Cargo.toml)
+          rpkg=$(sed -n 's/^Version: *//p' rpkg/DESCRIPTION)
+          echo "Cargo: $cargo, R package: $rpkg, ref: $GITHUB_REF_NAME"
+          [ "$cargo" = "$rpkg" ] || { echo "::error::Cargo.toml and rpkg/DESCRIPTION differ"; exit 1; }
+          if [ "$GITHUB_REF_TYPE" = tag ] && [ "$GITHUB_REF_NAME" != "v$cargo" ]; then
+            echo "::error::the tag is $GITHUB_REF_NAME, but the version is $cargo"; exit 1
+          fi
+          echo "version=$cargo" >> "$GITHUB_OUTPUT"
+
+  binary:
+    name: Binary (${{ matrix.target }})
+    needs: versions
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-24.04, target: x86_64-unknown-linux-musl }
+          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-musl }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc }
+          - { os: macos-latest, target: aarch64-apple-darwin }
+          - { os: macos-latest, target: x86_64-apple-darwin }
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - if: contains(matrix.target, 'musl')
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - run: cargo build --release --locked -p rok-cli --target ${{ matrix.target }}
+      - name: Package
+        shell: bash
+        run: |
+          exe=rok; [[ "${{ matrix.target }}" == *windows* ]] && exe=rok.exe
+          file=rok-${{ matrix.target }}.tar.gz
+          tar -czf "$file" -C "target/${{ matrix.target }}/release" "$exe"
+          if command -v sha256sum > /dev/null; then sha256sum "$file" > "$file.sha256"; else shasum -a 256 "$file" > "$file.sha256"; fi
+          cat "$file.sha256"
+          # The binary must report the release's version (when it runs on this machine).
+          if [[ "${{ matrix.target }}" != x86_64-apple-darwin ]]; then
+            "target/${{ matrix.target }}/release/$exe" --version | grep -x "rok ${{ needs.versions.outputs.version }}"
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rok-${{ matrix.target }}
+          path: rok-${{ matrix.target }}.tar.gz*
+
+  rpkg:
+    name: R package
+    needs: versions
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: r-lib/actions/setup-r@v2
+      - run: R CMD build rpkg
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rpkg
+          path: rok_*.tar.gz
+
+  publish:
+    name: Publish
+    needs: [versions, binary, rpkg]
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: files
+          merge-multiple: true
+      - run: ls -l files
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.versions.outputs.version }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" files/* --repo "$GITHUB_REPOSITORY" --prerelease \
+            --title "rok $VERSION" \
+            --notes "rok $VERSION (pre-release). Install the R package from \`rok_$VERSION.tar.gz\`, then run \`rok::setup()\`; or download the binary for your machine."

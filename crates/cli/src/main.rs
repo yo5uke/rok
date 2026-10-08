@@ -4,6 +4,7 @@ mod activate;
 mod commands;
 mod import;
 mod rcmd;
+mod selfcmd;
 mod ui;
 
 use std::path::PathBuf;
@@ -139,6 +140,12 @@ enum Command {
         #[arg(value_name = "PACKAGE")]
         package: String,
     },
+    /// Manage rok itself.
+    #[command(name = "self")]
+    SelfCmd {
+        #[command(subcommand)]
+        command: SelfCommand,
+    },
     /// Show the dependency tree.
     Tree {
         /// Show only this package's dependencies.
@@ -147,6 +154,16 @@ enum Command {
         /// How many levels to show.
         #[arg(long, value_name = "N")]
         depth: Option<usize>,
+    },
+}
+
+#[derive(Subcommand)]
+enum SelfCommand {
+    /// Update rok (the binary and the copies of its R package) to the newest release.
+    Update {
+        /// Also consider pre-releases.
+        #[arg(long)]
+        prerelease: bool,
     },
 }
 
@@ -256,6 +273,9 @@ fn main() -> ExitCode {
         },
         Command::Why { package } => commands::why(&ui, project, &package),
         Command::Tree { package, depth } => commands::tree(&ui, project, package, depth),
+        Command::SelfCmd {
+            command: SelfCommand::Update { prerelease },
+        } => selfcmd::update(&ui, prerelease),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,

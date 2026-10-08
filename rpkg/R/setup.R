@@ -1,26 +1,26 @@
 # Installing the rok binary and placing this package where activated projects can see it
 # (requirements chapter 4).
 
-# Where releases of the binary are published. The final location is decided when releases
-# start; `options(rok.release_url = )` overrides it.
+# Where releases of the binary are published (GitHub Releases); `options(rok.release_url = )`
+# overrides it.
 default_release_url <- "https://github.com/yo5uke/rok/releases/download"
 
-# The Rust target name of this machine, as release files are named.
+# The Rust target name of this machine, as release files are named. Linux binaries are static
+# (musl), so they run on any distribution.
 rust_target <- function(sysname = Sys.info()[["sysname"]], machine = R.version$arch) {
   arch <- if (machine %in% c("aarch64", "arm64")) "aarch64" else "x86_64"
   switch(sysname,
-    Linux = paste0(arch, "-unknown-linux-gnu"),
+    Linux = paste0(arch, "-unknown-linux-musl"),
     Darwin = paste0(arch, "-apple-darwin"),
     Windows = "x86_64-pc-windows-msvc",
     stop("rok has no binary for ", sysname, ".", call. = FALSE)
   )
 }
 
-# The release file of the binary for this machine.
+# The release file of the binary for this machine (a .tar.gz on every OS).
 release_file <- function(version, target = rust_target()) {
-  ext <- if (grepl("windows", target, fixed = TRUE)) ".zip" else ".tar.gz"
   base <- getOption("rok.release_url", default_release_url)
-  sprintf("%s/v%s/rok-%s%s", base, version, target, ext)
+  sprintf("%s/v%s/rok-%s.tar.gz", base, version, target)
 }
 
 # Where this package is kept for activated projects: one library per R minor version.
@@ -107,7 +107,7 @@ download_binary <- function(url, dir) {
       stop("The download of ", url, " is damaged (SHA-256 mismatch).", call. = FALSE)
     }
   }
-  if (grepl("\\.zip$", file)) utils::unzip(file, exdir = dir) else utils::untar(file, exdir = dir)
+  utils::untar(file, exdir = dir)
   found <- list.files(dir, pattern = paste0("^", exe("rok"), "$"), recursive = TRUE, full.names = TRUE)
   if (!length(found)) stop(url, " does not contain the rok binary.", call. = FALSE)
   found[[1L]]

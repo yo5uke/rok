@@ -981,6 +981,11 @@ fn check_checksum(
     Ok(())
 }
 
+/// The SHA-256 of `bytes`, in lowercase hex.
+pub fn sha256_hex(bytes: &[u8]) -> String {
+    hex(&Sha256::digest(bytes))
+}
+
 pub(crate) fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }

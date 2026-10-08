@@ -73,6 +73,20 @@ impl<'a> GitHub<'a> {
         })
     }
 
+    /// The repository's releases (newest first, as GitHub lists them), as JSON.
+    pub fn releases(&self, owner: &str, repo: &str) -> Result<serde_json::Value, GitHubError> {
+        let body = self.api(
+            owner,
+            repo,
+            "/releases?per_page=30",
+            "application/vnd.github+json",
+        )?;
+        serde_json::from_slice(&body).map_err(|e| GitHubError::Response {
+            url: format!("{API}/repos/{owner}/{repo}/releases"),
+            message: e.to_string(),
+        })
+    }
+
     /// The commit a reference points to (the default branch for [`GitRef::DefaultBranch`]).
     pub fn resolve(
         &self,

@@ -1,12 +1,17 @@
 # Release names, and (when ROK_TEST_BINARY points to a rok binary of the same version) setup()
 # and a call through the binary. Everything is written under a temporary directory.
 stopifnot(
-  identical(rok:::rust_target("Linux", "x86_64"), "x86_64-unknown-linux-gnu"),
+  identical(rok:::rust_target("Linux", "x86_64"), "x86_64-unknown-linux-musl"),
+  identical(rok:::rust_target("Linux", "aarch64"), "aarch64-unknown-linux-musl"),
   identical(rok:::rust_target("Darwin", "arm64"), "aarch64-apple-darwin"),
   identical(rok:::rust_target("Windows", "x86_64"), "x86_64-pc-windows-msvc"),
   identical(
-    rok:::release_file("0.1.0", "x86_64-unknown-linux-gnu"),
-    "https://github.com/yo5uke/rok/releases/download/v0.1.0/rok-x86_64-unknown-linux-gnu.tar.gz"
+    rok:::release_file("0.1.0", "x86_64-unknown-linux-musl"),
+    "https://github.com/yo5uke/rok/releases/download/v0.1.0/rok-x86_64-unknown-linux-musl.tar.gz"
+  ),
+  identical(
+    rok:::release_file("0.1.0", "x86_64-pc-windows-msvc"),
+    "https://github.com/yo5uke/rok/releases/download/v0.1.0/rok-x86_64-pc-windows-msvc.tar.gz"
   ),
   identical(rok:::opt("--to", NULL), character()),
   identical(rok:::opt("--depth", 2), c("--depth", "2"))

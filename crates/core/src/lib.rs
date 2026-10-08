@@ -23,6 +23,7 @@ pub mod pin;
 pub mod platform;
 pub mod project;
 pub mod rdetect;
+pub mod release;
 pub mod renv;
 pub mod repo;
 pub mod resolve;

@@ -83,8 +83,13 @@ check_version <- function(bin) {
     )
   }
   if (!identical(found, wanted)) {
-    stop("The rok binary is version ", found, ", but the R package is ", wanted, ".\n",
-      "i Run `rok::setup()` to install the matching binary.",
+    # A newer binary (after `rok self update`) asks for a newer package, not an older binary.
+    fix <- if (utils::compareVersion(found, wanted) > 0) {
+      paste0("i Update the rok package to ", found, ", or run `rok::setup()` to go back to rok ", wanted, ".")
+    } else {
+      "i Run `rok::setup()` to install the matching binary."
+    }
+    stop("The rok binary is version ", found, ", but the R package is ", wanted, ".\n", fix,
       call. = FALSE
     )
   }
