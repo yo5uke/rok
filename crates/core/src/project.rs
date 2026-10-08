@@ -114,12 +114,21 @@ local({
   if (!is.na(bin)) {
     args <- c("activate", "--r-home", R.home(), if (interactive()) "--interactive")
     repeat {
+      # Capturing a program's output (stdout = TRUE) takes R about 0.2 s on Windows; sending it
+      # to a file does not, so a file is used there (V13).
+      file <- if (.Platform$OS.type == "windows") tempfile("rok-") else TRUE
       out <- tryCatch(
-        suppressWarnings(system2(bin, shQuote(args), stdout = TRUE, stderr = "")),
+        suppressWarnings(system2(bin, shQuote(args), stdout = file, stderr = "")),
         error = function(e) structure(character(), status = 1L)
       )
-      status <- attr(out, "status")
-      if (is.null(status)) status <- 0L
+      if (is.character(file)) {
+        status <- out
+        out <- if (file.exists(file)) readLines(file, warn = FALSE, encoding = "UTF-8") else character()
+        unlink(file)
+      } else {
+        status <- attr(out, "status")
+      }
+      if (is.null(status) || !length(status)) status <- 0L
       value <- function(key) sub(paste0("^", key, "="), "", grep(paste0("^", key, "="), out, value = TRUE))
       if (status == 2L && length(value("choice"))) {
         choices <- value("option")
