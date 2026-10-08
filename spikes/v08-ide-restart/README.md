@@ -81,3 +81,11 @@ B. 1 軽い同期の表示：
 ## 後片付け
 
 V7 の手順書の「後片付け」を参照してください。
+
+## Windows の場合（Windows の Positron・RStudio）
+
+V7 の「Windows の場合」の準備（`prepare-windows.ps1`）を済ませてから行います。A・B の手順と記録用紙は上と同じで、違いは次の点だけです。
+
+- **B の状態の切り替え**は、PowerShell で `pwsh -File v08-scenario.ps1 light`（`light`・`heavy`・`ask`・`reset`）を実行します
+- **RStudio for Windows** は、レジストリに登録された R を一覧に出します。rok が入れた R 4.5 は登録しないので、一覧に出ないはずです（出たかどうかを記録してください）。R 4.5 で試すときは、Tools > Global Options > General の「R version」で `%LOCALAPPDATA%\Programs\R\R-4.5.x` を選びます（RStudio の設定が変わるので、終わったら元に戻してください）。システムの R 4.6 のままでも、A（再起動）と、B の 5（R の版が違うときの案内）は確かめられます
+- **Windows の R のコンソール**の文字コードや記号（✔ ! ℹ ✖ •）の表示も見てください

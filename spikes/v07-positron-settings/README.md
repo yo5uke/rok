@@ -106,3 +106,49 @@ Positron の版：
 - `~/rok-ide-check`
 - `~/.local/share/R/rok/r/4.5.*`（R 4.5。`~/rok/target/release/rok r uninstall 4.5.x` でも消せます）
 - `~/.local/share/R/rok/bin`、`~/.local/share/R/rok/library`（rok のバイナリと R パッケージ）
+
+## Windows の場合（Windows の Positron）
+
+Windows の Positron と、Windows の R で同じことを確かめます。あわせて、V5 の「rok が入れた R（レジストリに登録しない）を Positron が認識するか」も見ます。手順の「確かめたいこと」と記録用紙は上と同じです。
+
+### 前提
+
+- Windows の Positron、システムの R 4.6（`C:\Program Files\R`）、PowerShell 7（`pwsh`）
+- rok.exe（Windows 向けにビルドしたもの）。WSL から Windows 側にソースを写し、`cargo.exe build --release` で作れます
+
+### 準備（最初に1回）
+
+PowerShell で次を実行します（`<rok.exe>` はビルドした rok.exe のパス）。
+
+```powershell
+pwsh -File prepare-windows.ps1 -Rok <rok.exe>
+```
+
+次のことを行います。
+
+- rok.exe と R パッケージを `R_user_dir("rok", "data")`（`%APPDATA%\R\data\R\rok`）に置く
+- R 4.5 を rok で `%LOCALAPPDATA%\Programs\R\R-4.5.x` に入れる（Posit の portable なビルド、約 105 MB。レジストリには書かない）
+- 試験用のプロジェクト `~\rok-ide-check` を作る（R 4.5 のプロジェクト。`.rok\R` は R 4.5 の R_HOME へのジャンクション）
+
+Windows では、管理者権限なしにファイルへのシンボリックリンクを作れないため、Linux の `.rok/bin/R` の代わりに、R_HOME へのジャンクション `.rok\R` を置いています。
+
+### 候補（`pwsh -File v07-variant.ps1 <番号>` で切り替える）
+
+| 候補 | 中身 |
+|---|---|
+| 0 | 設定なし（比較の基準。**R 4.5.x が一覧に出れば、レジストリなしでも認識される**＝V5） |
+| 1 | `positron.r.customBinaries`：`.rok\R\bin\R.exe` の絶対パス |
+| 2 | `positron.r.customBinaries`：相対パス `.rok/R/bin/R.exe` |
+| 3 | `positron.r.customBinaries`：`${workspaceFolder}/.rok/R/bin/R.exe` |
+| 4 | `positron.r.customRootFolders`：`%LOCALAPPDATA%\Programs\R` の絶対パス |
+| 5 | `positron.r.customRootFolders`：`~/AppData/Local/Programs/R`（`~` のまま） |
+
+確かめ方（Reload Window、インタープリターの一覧、`source("v07-probe.R")`）とワークスペースの信頼の確認は、上の手順 1〜3 と同じです。
+
+### 後片付け（Windows）
+
+V8 も終わってから、次を消して構いません。
+
+- `~\rok-ide-check`
+- `%LOCALAPPDATA%\Programs\R\R-4.5.*`（`rok r uninstall 4.5.x` でも消せます。rok が入れた印のある R だけを消します）
+- `%APPDATA%\R\data\R\rok`（rok.exe と R パッケージ）

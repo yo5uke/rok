@@ -14,7 +14,7 @@ param(
 $ErrorActionPreference = "Stop"
 [Console]::OutputEncoding = [Text.Encoding]::UTF8
 $Date = "2026-10-05"
-$Roots = @{ small = @("fixest", "modelsummary"); medium = @("tidyverse"); gis = @("sf", "terra", "tmap") }
+$RootsOf = @{ small = @("fixest", "modelsummary"); medium = @("tidyverse"); gis = @("sf", "terra", "tmap") }
 $out = Join-Path $PSScriptRoot "out\windows"
 New-Item -ItemType Directory -Force "$out\proj", "$out\log" | Out-Null
 $env:ROK_CACHE_DIR = "$out\cache"; $env:ROK_DATA_DIR = "$out\data"; $env:NO_COLOR = "1"; $env:ROK_BINARY = $Rok
@@ -38,8 +38,9 @@ foreach ($p in $Projects) {
   Remove-Item -Recurse -Force $d, $env:ROK_CACHE_DIR -ErrorAction SilentlyContinue
   & $Rok init $d --r 4.6 --yes *> "$out\log\rok-$p-init.log"
   (Get-Content "$d\rok.toml") -replace '^snapshot = .*', "snapshot = `"$Date`"" | Set-Content "$d\rok.toml"
-  $roots = $Roots[$p]
-  Timed rok $p setup 1 { & $Rok --project $d add @roots --yes }
+  # PowerShell の変数名は大文字と小文字を区別しないので、表とは別の名前にする
+  $pkgs = $RootsOf[$p]
+  Timed rok $p setup 1 { & $Rok --project $d add @pkgs --yes }
   foreach ($i in 1..$NCold) {
     Remove-Item -Recurse -Force $env:ROK_CACHE_DIR, "$d\.rok\library" -ErrorAction SilentlyContinue
     Timed rok $p cold $i { & $Rok --project $d sync --yes }
@@ -66,7 +67,7 @@ foreach ($p in $Projects) {
 "## 中央値（秒）"
 $rows = Import-Csv $csv | Where-Object scenario -ne "setup"
 $rows | Group-Object tool, project, scenario | ForEach-Object {
-  $v = $_.Group | ForEach-Object { [double]$_.seconds } | Sort-Object
+  $v = @($_.Group | ForEach-Object { [double]$_.seconds } | Sort-Object)
   $m = if ($v.Count % 2) { $v[[int][math]::Floor($v.Count / 2)] } else { ($v[$v.Count / 2 - 1] + $v[$v.Count / 2]) / 2 }
   $bad = ($_.Group | Where-Object status -ne "0").Count
   "{0,-30} {1,8:N3}  n={2} 失敗={3} pkgs={4}" -f $_.Name, $m, $v.Count, $bad, $_.Group[0].npkgs

@@ -181,3 +181,21 @@ rok は未実装なので、今回は比較対象（renv・pak・rv・uvr）の�
 ## 残り
 
 - Windows の測定（V13 の Windows 分。2-2 で検討）
+
+## 追記：Windows の rok の測定（2026-10-08、2-8）
+
+再現：`pwsh -File bench-rok-windows.ps1 -Rok <rok.exe>`（bench-rok.sh と同じ条件：日付 2026-10-05、R 4.6.1、small・medium・gis。時間は Stopwatch）
+環境：Windows 11、Defender のリアルタイム保護は有効、システムの R 4.6.1（`C:\Program Files\R`）、P3M の Windows のバイナリ（zip）、ライブラリはジャンクション
+
+中央値（秒）。S2〜S4 は1回目の測定、S1 は activate.R を直した後の2回目の測定（2回目は、別の試験が同時に走っていた時間があり、S2〜S4 は採らない）。
+
+| 場面 | small | medium | gis | Linux（rok） | 目標 |
+|---|---|---|---|---|---|
+| S1 起動の上乗せ | +0.022 s | +0.033 s | +0.024 s | +0.006〜0.012 s | 100 ms 以内 |
+| S2 依存の解決 | 0.37 s | 0.36 s | 0.36 s | 0.43〜0.46 s | 1 秒以内 |
+| S3 キャッシュあり | 0.072 s | 0.17 s | 0.15 s | 0.07〜0.09 s | 2 秒以内 |
+| S4 キャッシュなし | 5.6 s | 9.8 s | 12.2 s | 5.6〜11.3 s | 比較対象の中で最速クラス |
+
+- **S1**：最初の測定では +0.22 s で、目標を超えた。原因は R の `system2(..., stdout = TRUE)` で、Windows では呼ぶプログラムによらず約 0.2 s かかる（`rok activate` そのものは約 21 ms、`cmd /c exit` は約 15 ms）。出力をファイルに書かせると約 20 ms で済むため、activate.R は Windows ではセッションの一時ファイルで受け取るようにした（Linux は従来どおり）。R パッケージの各コマンドは、もともとファイルで受け取っている（`--version` の確認だけはセッションに1回、約 0.2 s かかる）
+- **S2〜S4**：Linux と同じ水準で、目標を満たす。S4 は、取得（P3M の Windows のバイナリは Linux より大きい。medium で約 100 MB）と展開（Defender の検査を含む）が大半である
+- **Windows の目標値（第9章）**：Linux と同じ目標（S1 100 ms、S2 1 秒、S3 2 秒）を、そのまま Windows にも置ける

@@ -16,7 +16,7 @@ local({
     paste("startup hook (.Rprofile) ran in the new session:", length(started_after) > 0L),
     paste("working directory kept:", identical(getwd(), before$wd), sprintf("(%s)", getwd())),
     paste("global variable survived the restart:", exists("v08_marker", envir = globalenv())),
-    paste("project library first in .libPaths():", grepl("/.rok/library/", .libPaths()[[1L]], fixed = TRUE)),
+    paste("project library first in .libPaths():", grepl("[/\\\\]\\.rok[/\\\\]library[/\\\\]", .libPaths()[[1L]])),
     ""
   )
   cat(lines, sep = "\n")
