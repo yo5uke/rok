@@ -442,6 +442,20 @@ pub fn pin(
         bail!("Cancelled. Nothing was changed.");
     }
 
+    // Positron's settings follow, if rok wrote them for the old R.
+    let ide_settings = match &old_lock {
+        Some(old) => {
+            let new_r = installs
+                .iter()
+                .find(|i| i.version == target)
+                .cloned()
+                .unwrap_or_else(|| rinstall::managed_installation(&env.dirs, &target));
+            let old_r = rinstall::managed_installation(&env.dirs, &old.r);
+            crate::commands::plan_ide_settings(ui, &env, &project.root, &new_r, Some(&old_r))?
+        }
+        None => None,
+    };
+
     // Install the new R if needed, then sync its library before saving anything.
     let r = match ops::select_r(&installs, &target.minor(), Some(&target)) {
         Some(r) => Some(r.clone()),
@@ -468,6 +482,13 @@ pub fn pin(
         None => None,
     };
     project.save(&new_text, &lock, true)?;
+    if let Some(text) = &ide_settings {
+        project.write_ide_settings(text, true)?;
+        ui.success(&format!(
+            "Set R {target} as Positron's R for this project ({}).",
+            rok_core::ide::SETTINGS_FILE
+        ));
+    }
     if let Some(report) = &report {
         summary(ui, report, &lock, start);
     } else {

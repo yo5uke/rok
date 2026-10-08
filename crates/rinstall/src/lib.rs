@@ -291,13 +291,29 @@ pub struct Installed {
     pub build: BuildKind,
 }
 
-/// The directory of a managed R version: `<version>`, or on Windows `R-<version>` as CRAN's
-/// installer names it.
+/// The directory of a managed R version: `<version>` on Linux, `R-<version>` on Windows (as
+/// CRAN's installer names it) and macOS (as Posit's builds unpack).
 pub fn install_dir(dirs: &UserDirs, version: &Version) -> PathBuf {
-    if cfg!(windows) {
-        dirs.r_installs().join(format!("R-{version}"))
-    } else {
+    if cfg!(target_os = "linux") {
         dirs.r_installs().join(version.as_str())
+    } else {
+        dirs.r_installs().join(format!("R-{version}"))
+    }
+}
+
+/// R `version` as rok installs it (whether or not it is installed yet): R_HOME is
+/// [`install_dir`] itself on Windows and macOS, and its `lib/R` on Linux.
+pub fn managed_installation(dirs: &UserDirs, version: &Version) -> RInstallation {
+    let dir = install_dir(dirs, version);
+    RInstallation {
+        version: version.clone(),
+        r_home: if cfg!(target_os = "linux") {
+            dir.join("lib").join("R")
+        } else {
+            dir.clone()
+        },
+        executable: dir.join("bin").join(rdetect::exe_name("R")),
+        kind: RKind::Managed,
     }
 }
 

@@ -420,6 +420,8 @@ pub fn import_renv(
     result["snapshot"] = json!(date);
     result["declared"] = json!(list);
     result["unmanaged"] = json!(unmanaged);
+    result["root"] = json!(project.root);
+    result["r"] = json!(r.version.to_string());
     ui.result(result);
     Ok(())
 }

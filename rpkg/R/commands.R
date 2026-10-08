@@ -16,6 +16,12 @@ project_arg <- function(project) {
 #' version of the R that is running, and the latest snapshot date that Posit Package Manager
 #' has published. If the rok binary is not installed yet, [setup()] installs it first.
 #'
+#' In an interactive session, R then switches to the project: in Positron or RStudio, R
+#' restarts (after asking if the global environment has objects), or the IDE opens the new
+#' project's folder; elsewhere, the project is activated in this session if no packages are
+#' loaded yet. In Positron, the project's R is also written to `.vscode/settings.json`, after
+#' asking.
+#'
 #' @param path The project directory (created if needed).
 #' @param r The R version, such as `"4.6"` or `"latest"` (default: the running R).
 #' @param name The project name (default: the directory name).
@@ -29,7 +35,9 @@ init <- function(path = ".", r = NULL, name = NULL) {
   # The first init installs the binary, after asking once.
   if (!rok_available()) setup()
   if (is.null(r)) r <- current_r_minor()
-  invisible(rok_call(c("init", path.expand(path), opt("--r", r), opt("--name", name))))
+  result <- rok_call(c("init", path.expand(path), opt("--r", r), opt("--name", name)))
+  if (interactive() && !is.null(result$root)) switch_to_project(result$root, result$r)
+  invisible(result)
 }
 
 #' Add packages

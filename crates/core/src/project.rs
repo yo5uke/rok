@@ -41,6 +41,10 @@ fn io_err(path: &Path) -> impl FnOnce(std::io::Error) -> ProjectError + '_ {
 /// The file in `.rok/undo/` that marks a migration from renv as the change to undo.
 const IMPORT_MARK: &str = "import-from-renv";
 
+/// The file in `.rok/undo/` that keeps the IDE settings from before the last change, when the
+/// change rewrote them: `present` or `absent`, a newline, then the text.
+const IDE_SETTINGS_BACKUP: &str = "ide-settings";
+
 /// The line `.Rprofile` uses to run the startup hook.
 pub const RPROFILE_LINE: &str = "source(\".rok/activate.R\")";
 
@@ -272,8 +276,10 @@ impl Project {
     /// `.rok/undo/` (one generation) so the change can be undone.
     pub fn save(&self, manifest: &str, lock: &Lockfile, backup: bool) -> Result<(), ProjectError> {
         if backup {
-            // This change is now the one undo reverts, not a migration from renv before it.
+            // This change is now the one undo reverts, not an earlier migration from renv or an
+            // earlier change of the IDE settings.
             let _ = std::fs::remove_file(self.undo_dir().join(IMPORT_MARK));
+            let _ = std::fs::remove_file(self.undo_dir().join(IDE_SETTINGS_BACKUP));
             let undo = self.undo_dir();
             for (from, name) in [
                 (self.manifest_path(), manifest::FILE_NAME),
@@ -320,6 +326,44 @@ impl Project {
             Err(e) => return Err(io_err(&lock)(e)),
         };
         Ok(Some((text, lock)))
+    }
+
+    /// Writes the IDE settings file (`.vscode/settings.json`). With `backup`, the current file
+    /// is kept in `.rok/undo/` first, so undoing the change that came with it restores it.
+    pub fn write_ide_settings(&self, text: &str, backup: bool) -> Result<(), ProjectError> {
+        let path = self.root.join(crate::ide::SETTINGS_FILE);
+        if backup {
+            let saved = match std::fs::read_to_string(&path) {
+                Ok(old) => format!("present\n{old}"),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => "absent\n".to_string(),
+                Err(e) => return Err(io_err(&path)(e)),
+            };
+            let to = self.undo_dir().join(IDE_SETTINGS_BACKUP);
+            write_atomic(&to, saved.as_bytes()).map_err(io_err(&to))?;
+        }
+        write_atomic(&path, text.as_bytes()).map_err(io_err(&path))
+    }
+
+    /// Restores the IDE settings saved by [`Project::write_ide_settings`], if any. Returns
+    /// whether there were any.
+    pub fn undo_ide_settings(&self) -> Result<bool, ProjectError> {
+        let saved_path = self.undo_dir().join(IDE_SETTINGS_BACKUP);
+        let saved = match std::fs::read_to_string(&saved_path) {
+            Ok(s) => s,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(e) => return Err(io_err(&saved_path)(e)),
+        };
+        let path = self.root.join(crate::ide::SETTINGS_FILE);
+        match saved.split_once('\n') {
+            Some(("present", text)) => {
+                write_atomic(&path, text.as_bytes()).map_err(io_err(&path))?
+            }
+            _ => {
+                let _ = std::fs::remove_file(&path);
+            }
+        }
+        std::fs::remove_file(&saved_path).map_err(io_err(&saved_path))?;
+        Ok(true)
     }
 
     /// Forgets the saved state (after it was restored).

@@ -108,6 +108,20 @@ impl UserDirs {
         Ok(UserDirs { data, cache, r })
     }
 
+    /// Where rok installs R when no environment variable moves rok's directories: the same
+    /// place, relative to the home directory, for everyone (Windows needs `LOCALAPPDATA`).
+    pub fn default_r_installs(
+        os: Os,
+        var: impl Fn(&str) -> Option<String>,
+        home: Option<PathBuf>,
+    ) -> Option<PathBuf> {
+        let only_os = |k: &str| match k {
+            "APPDATA" | "LOCALAPPDATA" => var(k),
+            _ => None,
+        };
+        UserDirs::resolve(os, only_os, home).ok().map(|d| d.r)
+    }
+
     /// Directories under one root, for tests: `<root>/data`, `<root>/cache`, `<root>/data/r`.
     pub fn under(root: &std::path::Path) -> UserDirs {
         UserDirs {

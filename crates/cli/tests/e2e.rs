@@ -444,3 +444,79 @@ fn migrates_from_renv_and_back() {
         "source(\"renv/activate.R\")\n"
     );
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "needs the network and R"]
+fn writes_positron_settings_for_rok_s_r() {
+    let t = tempfile::tempdir().unwrap();
+    let home = t.path();
+    // An R that rok "installed": its default place under a temporary home, linking to the
+    // installed R (no download).
+    let out = Command::new("Rscript")
+        .args(["-e", "cat(R.home('bin'), as.character(getRversion()))"])
+        .output()
+        .unwrap();
+    let out = String::from_utf8(out.stdout).unwrap();
+    let (bin, version) = out.rsplit_once(' ').unwrap();
+    let managed = home.join(".local/share/R/rok/r").join(version).join("bin");
+    std::fs::create_dir_all(&managed).unwrap();
+    std::os::unix::fs::symlink(Path::new(bin).join("R"), managed.join("R")).unwrap();
+    let minor = version.rsplit_once('.').unwrap().0;
+    let run = |dir: &Path, args: &[&str], positron: bool| {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_rok"));
+        cmd.args(args)
+            .current_dir(dir)
+            .env("HOME", home)
+            .env("ROK_CACHE_DIR", home.join("cache"))
+            .env("NO_COLOR", "1")
+            .env_remove("ROK_DATA_DIR")
+            .env_remove("R_USER_DATA_DIR")
+            .env_remove("XDG_DATA_HOME")
+            .env_remove("POSITRON")
+            .env_remove("TERM_PROGRAM");
+        if positron {
+            cmd.env("POSITRON", "1");
+        }
+        cmd.output().unwrap()
+    };
+
+    // Inside Positron: asked first (nothing written), then written with paths from ~.
+    let asked = run(home, &["init", "proj", "--r", minor, "--json"], true);
+    assert_eq!(
+        asked.status.code(),
+        Some(2),
+        "{}",
+        String::from_utf8_lossy(&asked.stderr)
+    );
+    let needs: serde_json::Value = serde_json::from_slice(&asked.stdout).unwrap();
+    assert_eq!(needs["needs"]["id"], "ide-settings");
+    assert!(!home.join("proj/rok.toml").exists());
+    let done = run(
+        home,
+        &[
+            "init",
+            "proj",
+            "--r",
+            minor,
+            "--json",
+            "--confirmed",
+            "ide-settings",
+        ],
+        true,
+    );
+    assert_eq!(json(&done)["ide_settings"], true);
+    let settings = std::fs::read_to_string(home.join("proj/.vscode/settings.json")).unwrap();
+    assert!(
+        settings.contains(&format!(
+            "\"positron.r.interpreters.default\": \"~/.local/share/R/rok/r/{version}/bin/R\""
+        )),
+        "{settings}"
+    );
+    assert!(settings.contains("\"positron.r.customRootFolders\": [\"~/.local/share/R/rok/r\"]"));
+
+    // Outside Positron: no settings.
+    let other = run(home, &["init", "other", "--r", minor, "--json"], false);
+    assert_eq!(json(&other)["ide_settings"], false);
+    assert!(!home.join("other/.vscode").exists());
+}

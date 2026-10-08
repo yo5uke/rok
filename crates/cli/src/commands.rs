@@ -296,6 +296,8 @@ pub fn init(
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| "project".into())
     });
+    // Positron's settings for the project's R, asked before anything is written.
+    let ide_settings = plan_ide_settings(ui, &env, &dir, &r, None)?;
     let minor: Version = r.version.minor().parse()?;
     let manifest_text = manifest::new_manifest_text(&name, &minor, &date);
     let lock = Lockfile {
@@ -320,6 +322,14 @@ pub fn init(
         r.r_home.display()
     ));
     ui.bullet(&format!("Snapshot {date}"));
+    if let Some(text) = &ide_settings {
+        project.write_ide_settings(text, false)?;
+        ui.success(&format!(
+            "Set R {} as Positron's R for this project ({}).",
+            r.version,
+            rok_core::ide::SETTINGS_FILE
+        ));
+    }
     if rprofile_changed {
         ui.info("Added `source(\".rok/activate.R\")` to the top of your existing .Rprofile.");
     }
@@ -330,8 +340,88 @@ pub fn init(
         "name": name,
         "r": r.version.to_string(),
         "snapshot": date,
+        "ide_settings": ide_settings.is_some(),
     }));
     Ok(())
+}
+
+/// The `.vscode/settings.json` text that makes Positron use `r` (requirements chapter 6), if
+/// the person agrees. Asked before anything changes, so programs can answer with
+/// `--confirmed`. With `replacing`, the R whose settings rok wrote before, the settings are
+/// updated only if the file still has those (`rok r pin`); without it, they are offered when
+/// rok runs inside Positron (`rok init`).
+pub(crate) fn plan_ide_settings(
+    ui: &Ui,
+    env: &Env,
+    root: &Path,
+    r: &RInstallation,
+    replacing: Option<&RInstallation>,
+) -> anyhow::Result<Option<String>> {
+    use rok_core::{ide, jsonc};
+
+    let var = |k: &str| std::env::var(k).ok();
+    let os = env.platform.os;
+    let home = std::env::home_dir();
+    let settings_for = |r: &RInstallation| {
+        let home = home.as_ref()?;
+        let dir = rok_core::paths::UserDirs::default_r_installs(os, var, Some(home.clone()))?;
+        ide::positron_settings(os, r, &dir, home)
+    };
+    let path = root.join(ide::SETTINGS_FILE);
+    let old = std::fs::read_to_string(&path).unwrap_or_default();
+    let has = |key: &str, value: &serde_json::Value| {
+        jsonc::get(&old, key).ok().flatten().as_ref() == Some(value)
+    };
+    match replacing {
+        Some(previous) => {
+            let written = settings_for(previous)
+                .is_some_and(|s| s.iter().any(|(k, v)| *k == ide::DEFAULT_R && has(k, v)));
+            if !written {
+                return Ok(None);
+            }
+        }
+        None if !ide::in_positron(var) => return Ok(None),
+        None => {}
+    }
+    let Some(settings) = settings_for(r) else {
+        let binary = ide::positron_binary(os, r).display().to_string();
+        ui.info(&format!(
+            "To make Positron use R {} in this project, set `{}` to \"{}\" in {}.",
+            r.version,
+            ide::DEFAULT_R,
+            binary.replace('\\', "/"),
+            ide::SETTINGS_FILE
+        ));
+        return Ok(None);
+    };
+    if settings.iter().all(|(k, v)| has(k, v)) {
+        return Ok(None);
+    }
+    let new = match jsonc::set(&old, &settings, ide::COMMENT) {
+        Ok(text) => text,
+        Err(e) => {
+            ui.warn(&format!(
+                "rok leaves {} alone: it could not be read ({e}).",
+                ide::SETTINGS_FILE
+            ));
+            return Ok(None);
+        }
+    };
+    ui.info(&format!(
+        "Settings that make Positron use R {} in this project:",
+        r.version
+    ));
+    for (k, v) in &settings {
+        ui.bullet(&format!("\"{k}\": {v}"));
+    }
+    if !ui.confirm(
+        "ide-settings",
+        &format!("Write them to {}?", ide::SETTINGS_FILE),
+        true,
+    )? {
+        return Ok(None);
+    }
+    Ok(Some(new))
 }
 
 /// The R for a new project: the newest installed one, or the one asked for with `--r`. If it is
@@ -1065,8 +1155,13 @@ pub fn undo(ui: &Ui, project_dir: Option<&Path>) -> anyhow::Result<()> {
     let mut lock = saved_lock;
     let report = sync_library(ui, &env, &project, &manifest, &mut lock, &r)?;
     project.save(&manifest_text, &lock, false)?;
+    let ide = project.undo_ide_settings()?;
     project.clear_undo()?;
-    ui.success("Undid the last change to rok.toml and rok.lock.");
+    ui.success(if ide {
+        "Undid the last change to rok.toml, rok.lock and the IDE settings."
+    } else {
+        "Undid the last change to rok.toml and rok.lock."
+    });
     ui.changes(&changes);
     summary(ui, &report, &lock, start);
     ui.result(report_json("undo", &changes, &report));
