@@ -2,7 +2,7 @@
 # (requirements chapter 4).
 
 # Where releases of the binary are published. The final location is decided when releases
-# start (roadmap 2-10); `options(rok.release_url = )` overrides it.
+# start; `options(rok.release_url = )` overrides it.
 default_release_url <- "https://github.com/yo5uke/rok/releases/download"
 
 # The Rust target name of this machine, as release files are named.
