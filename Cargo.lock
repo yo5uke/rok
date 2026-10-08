@@ -468,9 +468,11 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "flate2",
  "rok-core",
  "rok-rinstall",
  "serde_json",
+ "tar",
  "tempfile",
 ]
 

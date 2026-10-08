@@ -182,3 +182,41 @@ fn update_r_packages(ui: &Ui, env: &Env, version: &Version) -> anyhow::Result<Ve
     let _ = std::fs::remove_file(&tarball);
     Ok(updated)
 }
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    /// A release archive whose `rok` is a script that reports `version`.
+    fn archive(version: &str) -> Vec<u8> {
+        let script = format!("#!/bin/sh\necho 'rok {version}'\n");
+        let mut builder = tar::Builder::new(flate2::write::GzEncoder::new(
+            Vec::new(),
+            flate2::Compression::fast(),
+        ));
+        let mut header = tar::Header::new_gnu();
+        header.set_size(script.len() as u64);
+        header.set_mode(0o755);
+        header.set_cksum();
+        builder
+            .append_data(&mut header, "rok", script.as_bytes())
+            .unwrap();
+        builder.into_inner().unwrap().finish().unwrap()
+    }
+
+    #[test]
+    fn replaces_the_binary_only_with_the_expected_version() {
+        let t = tempfile::tempdir().unwrap();
+        let exe = t.path().join("rok");
+        std::fs::write(&exe, "old").unwrap();
+        let v: Version = "9.9.9".parse().unwrap();
+        // A binary that reports another version is refused, and nothing changes.
+        let err = replace(&t.path().join("w1"), &archive("9.9.8"), &exe, &v).unwrap_err();
+        assert!(err.to_string().contains("reports `rok 9.9.8`"), "{err}");
+        assert_eq!(std::fs::read_to_string(&exe).unwrap(), "old");
+        replace(&t.path().join("w2"), &archive("9.9.9"), &exe, &v).unwrap();
+        let out = Command::new(&exe).arg("--version").output().unwrap();
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "rok 9.9.9");
+        assert_eq!(old_exe(&exe), t.path().join("rok.old"));
+    }
+}
