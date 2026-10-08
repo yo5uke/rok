@@ -1,8 +1,8 @@
-# V2：バイナリパッケージを R を使わずに展開する（Linux・Windows 分）
+# V2：バイナリパッケージを R を使わずに展開する（3 OS）
 
 実施：2026-10-05（Ubuntu 24.04 / WSL2、V1 で置いた R 4.4.2、P3M 2026-10-01）
 再現：`./run.sh`（v01 の `run.sh` を先に実行しておく）
-Windows の分は、末尾の「Windows 分」にある。macOS の分は、まだ確かめていない。
+Windows・macOS の分は、末尾の「Windows 分」「macOS 分」にある。
 
 ## 結論
 
@@ -63,4 +63,25 @@ Windows の分は、末尾の「Windows 分」にある。macOS の分は、ま�
 1. **展開**：zip を Rust で展開する（zip の crate が要る）。Linux と同じく、R を起動しない
 2. **照合**：要件 第9章「完全性の検証」のとおり、索引の `Hash`（MD5）と照合できる（MD5 の crate が要る）
 3. **キャッシュのキー**：`x-package-binary-tag`（`4.6-win`）が使える
+
+## macOS 分
+
+実施：2026-10-08（GitHub Actions の macOS、arm64 と Intel、R 4.6.1（portable なビルド、V6）、P3M 2026-10-01）
+再現：`run-macos.sh`（`.github/workflows/spikes.yml`）
+
+### 結論
+
+**成功（macOS）。** P3M の macOS のバイナリ（tgz）は、展開するだけで使え、`R CMD INSTALL` で入れた場合と同一だった。
+
+| 項目 | arm64（`sonoma-arm64`） | Intel（`big-sur-x86_64`） |
+|---|---|---|
+| 取得（12件、逐次） | 43 MB を 6.6 秒、すべて binary | 45 MB を 12.1 秒、すべて binary |
+| MD5（索引の `Hash`） | 12/12 一致 | 10/12 一致（classInt・wk が不一致。後で取得し直すと一致した） |
+| 展開 | 0.42 秒、103 MB | 2.5 秒、108 MB |
+| 読み込み | 12/12 | 12/12 |
+| `R CMD INSTALL` との比較（R6・data.table・sf） | 同一 | 同一 |
+
+- バイナリの置き場所は、R のマイナー版と CPU ごとに P3M の `/__api__/status` の `macos_urls` が決める（R 4.6 の arm64 は `sonoma-arm64`、4.1〜4.5 は `big-sur-arm64`、Intel は `big-sur-x86_64`）
+- キャッシュのキーには、応答の `x-package-binary-tag`（Intel は `4.6-macos`）が使える
+- **MD5 の一時的な不一致**：P3M の索引とファイルが一時的に食い違うことがある。不一致のときは取得し直し、それでも合わなければ止める（照合を省かない）
 
