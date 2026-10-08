@@ -718,7 +718,9 @@ mod tests {
     fn installs_the_portable_build() {
         let platform = Platform::detect();
         let t = tempfile::tempdir().unwrap();
-        let dirs = UserDirs::under(t.path());
+        // macOS's temporary directories are behind a symbolic link (/var -> /private/var);
+        // R's scripts warn when the two spellings of R_HOME differ.
+        let dirs = UserDirs::under(&rok_core::fsutil::canonicalize(t.path()).unwrap());
         let version = v("4.5.3");
         let installed = install(&Http::new(), &dirs, &platform, &version, &|_| {}).unwrap();
         assert_eq!(installed.build, BuildKind::Portable);
