@@ -122,6 +122,28 @@ impl LinuxDistro {
     }
 }
 
+impl LinuxDistro {
+    /// The distribution as P3M's system requirements API names it (`ubuntu`, `24.04`). Only
+    /// the apt-based distributions are covered, as rok explains missing libraries with apt
+    /// (requirements, chapter 7); Ubuntu derivatives map to the Ubuntu release they are based on.
+    pub fn sysreqs_name(&self) -> Option<(&'static str, String)> {
+        match self.id.as_str() {
+            "ubuntu" => Some(("ubuntu", self.version_id.clone())),
+            "debian" => Some(("debian", self.version_id.clone())),
+            _ => {
+                let release = match self.ubuntu_codename.as_deref()? {
+                    "focal" => "20.04",
+                    "jammy" => "22.04",
+                    "noble" => "24.04",
+                    "resolute" => "26.04",
+                    _ => return None,
+                };
+                Some(("ubuntu", release.to_string()))
+            }
+        }
+    }
+}
+
 /// The platform: OS, architecture and, on Linux, the distribution.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Platform {
@@ -142,6 +164,13 @@ impl Platform {
                 None
             },
         }
+    }
+
+    /// The key of this distribution's system requirements in the lockfile (`ubuntu-24.04`) and
+    /// its name in P3M's API, on apt-based distributions.
+    pub fn sysreqs_distro(&self) -> Option<(String, &'static str, String)> {
+        let (distribution, release) = self.distro.as_ref()?.sysreqs_name()?;
+        Some((format!("{distribution}-{release}"), distribution, release))
     }
 
     /// The P3M Linux distribution name, if binaries are available for this machine.

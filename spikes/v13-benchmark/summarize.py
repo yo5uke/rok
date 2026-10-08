@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""V13：out/results.csv を集計し、場面ごとの中央値・最小・最大・四分位範囲を Markdown の表で出す。
+"""V13：out/results.csv（または引数の CSV）を集計し、場面ごとの中央値・最小・最大・四分位範囲を Markdown の表で出す。
 S1（start）は、基準（none：空のディレクトリ）の中央値との差を「上乗せ」として出す。
 """
 import csv
@@ -7,7 +7,11 @@ import statistics as st
 from collections import defaultdict
 from pathlib import Path
 
-rows = list(csv.DictReader(open(Path(__file__).parent / "out" / "results.csv")))
+import sys
+
+# 引数で CSV を選べる（rok の測定は bench-rok.sh が out/results-rok.csv に書く）
+src = Path(sys.argv[1]) if len(sys.argv) > 1 else Path(__file__).parent / "out" / "results.csv"
+rows = list(csv.DictReader(open(src)))
 groups = defaultdict(list)
 fails = defaultdict(int)
 pkgs = {}

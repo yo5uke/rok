@@ -12,8 +12,9 @@ use std::process::Command;
 use sha2::{Digest, Sha256};
 
 use crate::cache::{CacheError, PackageCache};
-use crate::github::{GitHub, GitHubError};
+use crate::github::{self, GitHub, GitHubError};
 use crate::http::{Http, HttpError};
+use crate::lockfile::Remote;
 use crate::p3m::{P3m, P3mError};
 use crate::par;
 use crate::platform::{Arch, Platform};
@@ -94,6 +95,9 @@ pub struct Wanted {
     pub sha256: Option<String>,
     /// Environment variables for building from source.
     pub env: BTreeMap<String, String>,
+    /// For packages from a repository: the Git origin to rebuild from if the repository no
+    /// longer has this release.
+    pub remote: Option<Remote>,
 }
 
 /// Everything installation needs.
@@ -120,8 +124,9 @@ pub enum Plan {
         key: String,
         sha256: Option<String>,
     },
-    /// Must be built from source.
-    Source,
+    /// Must be built from source; `git` when the repository no longer has the release, so it
+    /// is rebuilt from its Git origin.
+    Source { git: bool },
 }
 
 /// A built source package.
@@ -131,6 +136,15 @@ pub struct Built {
     pub path: PathBuf,
     /// SHA-256 of the source tarball, if it came from CRAN (P3M's source differs from CRAN's).
     pub sha256: Option<String>,
+    /// Rebuilt from the Git origin instead of the repository's release.
+    pub git: bool,
+}
+
+/// A downloaded source: a tarball, or a directory for Git sources.
+struct Fetched {
+    path: PathBuf,
+    sha256: Option<String>,
+    git: bool,
 }
 
 fn short_hash(s: &str) -> String {
@@ -198,6 +212,12 @@ impl Context<'_> {
         binary
             .and_then(|k| self.cache.get(&w.name, &w.version, &k))
             .or_else(|| self.cache.get(&w.name, &w.version, &self.build_key(w)))
+            .or_else(|| {
+                w.remote.as_ref().and_then(|_| {
+                    self.cache
+                        .get(&w.name, &w.version, &git_key(&self.build_key(w)))
+                })
+            })
     }
 
     /// Decides how each package will be made available. Packages not in the cache are looked
@@ -210,11 +230,10 @@ impl Context<'_> {
             if let Some(path) = self.cached(w) {
                 return Ok(Plan::Cached(path));
             }
-            let Some(distro) = distro else {
-                return Ok(Plan::Source);
-            };
             match &w.origin {
+                Origin::Snapshot(_) if distro.is_none() => Ok(Plan::Source { git: false }),
                 Origin::Snapshot(date) => {
+                    let distro = distro.expect("checked above");
                     let url = self
                         .p3m
                         .linux_package_url(distro, date, &w.name, &w.version);
@@ -234,20 +253,22 @@ impl Context<'_> {
                                 sha256: None,
                             })
                         }
-                        200..=399 => Ok(Plan::Source),
+                        200..=399 => Ok(Plan::Source { git: false }),
                         status => Err(HttpError::Status { url, status }.into()),
                     }
                 }
                 Origin::Repository { url, .. } => {
-                    let arch = self.platform.arch.r_name();
-                    let minor = self.r.version.minor();
-                    let index = self.repos.linux_index(url, distro, arch, &minor)?;
-                    Ok(
-                        match index
+                    let rebuilt = w.remote.as_ref().is_some_and(|r| r.rebuilt);
+                    if !rebuilt && let Some(distro) = distro {
+                        let arch = self.platform.arch.r_name();
+                        let minor = self.r.version.minor();
+                        let index = self.repos.linux_index(url, distro, arch, &minor)?;
+                        if let Some(e) = index
                             .as_ref()
                             .and_then(|i| repo::entry(i, &w.name, &w.version))
+                            .filter(|e| e.built)
                         {
-                            Some(e) if e.built => Plan::Binary {
+                            return Ok(Plan::Binary {
                                 url: repo::file_url(
                                     &repo::linux_contrib(url, distro, arch, &minor),
                                     &w.name,
@@ -258,12 +279,27 @@ impl Context<'_> {
                                     .repo_binary_key(url)
                                     .expect("P3M has binaries for this machine"),
                                 sha256: e.sha256.clone(),
-                            },
-                            _ => Plan::Source,
-                        },
-                    )
+                            });
+                        }
+                    }
+                    // A release the repository no longer has is rebuilt from its Git origin.
+                    let listed = !rebuilt && {
+                        let index = self.repos.source_index(url)?;
+                        repo::entry(&index, &w.name, &w.version).is_some()
+                    };
+                    match (listed, &w.remote) {
+                        (true, _) => Ok(Plan::Source { git: false }),
+                        (false, Some(_)) => Ok(Plan::Source { git: true }),
+                        (false, None) => Err(InstallError::SourceUnavailable {
+                            name: w.name.clone(),
+                            version: w.version.clone(),
+                            from: format!(
+                                "{url} any more, and it is not in the cache (rok.lock records no Git origin to rebuild it from)"
+                            ),
+                        }),
+                    }
                 }
-                Origin::GitHub { .. } => Ok(Plan::Source),
+                Origin::GitHub { .. } => Ok(Plan::Source { git: false }),
             }
         });
         results.into_iter().collect()
@@ -297,7 +333,7 @@ impl Context<'_> {
     ) -> Result<Vec<Built>, InstallError> {
         let tmp = self.cache.temp_dir()?;
         let sources = par::map(items, self.jobs, |w| self.download_source(w, tmp.path()));
-        let mut sources: HashMap<&str, (PathBuf, Option<String>)> = items
+        let mut sources: HashMap<&str, Fetched> = items
             .iter()
             .map(|w| w.name.as_str())
             .zip(sources)
@@ -308,78 +344,159 @@ impl Context<'_> {
         let mut out = Vec::new();
         for w in build_order(items) {
             progress(&format!("Building {} {} from source", w.name, w.version));
-            let (source, sha256) = sources
+            let fetched = sources
                 .remove(w.name.as_str())
                 .expect("every item was downloaded");
-            let path = self.build_one(w, &source, &known)?;
+            if fetched.git {
+                progress(&format!(
+                    "{} {} is no longer available from its repository; rebuilding it from Git",
+                    w.name, w.version
+                ));
+            }
+            let path = self.build_one(w, &fetched.path, &known, fetched.git)?;
             known.insert(w.name.clone(), path.clone());
             out.push(Built {
                 name: w.name.clone(),
                 path,
-                sha256,
+                sha256: fetched.sha256,
+                git: fetched.git,
             });
         }
         Ok(out)
     }
 
-    /// Downloads a package's source into `dir`. Returns the tarball (or, for GitHub, the source
-    /// directory) and the tarball's SHA-256 when it can be recorded in the lockfile.
-    fn download_source(
-        &self,
-        w: &Wanted,
-        dir: &Path,
-    ) -> Result<(PathBuf, Option<String>), InstallError> {
+    /// Downloads a package's source into `dir`: a tarball, or for Git sources a directory. The
+    /// tarball's SHA-256 is returned when it can be recorded in the lockfile.
+    fn download_source(&self, w: &Wanted, dir: &Path) -> Result<Fetched, InstallError> {
         match &w.origin {
-            Origin::Snapshot(date) => self.download_cran_source(w, date, dir),
+            Origin::Snapshot(date) => {
+                let (path, sha256) = self.download_cran_source(w, date, dir)?;
+                Ok(Fetched {
+                    path,
+                    sha256,
+                    git: false,
+                })
+            }
             Origin::Repository { url, .. } => {
-                let index = self.repos.source_index(url)?;
-                let e = repo::entry(&index, &w.name, &w.version).ok_or_else(|| {
-                    InstallError::SourceUnavailable {
+                if !w.remote.as_ref().is_some_and(|r| r.rebuilt) {
+                    let index = self.repos.source_index(url)?;
+                    if let Some(e) = repo::entry(&index, &w.name, &w.version) {
+                        let file_url = repo::file_url(
+                            &format!("{url}/src/contrib"),
+                            &w.name,
+                            &w.version,
+                            e.path.as_deref(),
+                        );
+                        let bytes = self.http.get_bytes(&file_url, None)?;
+                        check_sha256(w, &bytes, e.sha256.as_deref())?;
+                        match check_sha256(w, &bytes, w.sha256.as_deref()) {
+                            Ok(()) => {
+                                let path = dir.join(format!("{}_{}.tar.gz", w.name, w.version));
+                                std::fs::write(&path, &bytes).map_err(io_err(&path))?;
+                                return Ok(Fetched {
+                                    path,
+                                    sha256: Some(hex(&Sha256::digest(&bytes))),
+                                    git: false,
+                                });
+                            }
+                            // The repository replaced the release that rok.lock records: rebuild
+                            // the recorded commit instead (requirements, chapter 7).
+                            Err(_) if w.remote.is_some() => {}
+                            Err(e) => return Err(e),
+                        }
+                    }
+                }
+                let Some(remote) = &w.remote else {
+                    return Err(InstallError::SourceUnavailable {
                         name: w.name.clone(),
                         version: w.version.clone(),
                         from: format!("{url} any more, and it is not in the cache"),
-                    }
-                })?;
-                let file_url = repo::file_url(
-                    &format!("{url}/src/contrib"),
-                    &w.name,
-                    &w.version,
-                    e.path.as_deref(),
-                );
-                let bytes = self.http.get_bytes(&file_url, None)?;
-                let expected = w.sha256.as_deref().or(e.sha256.as_deref());
-                check_sha256(w, &bytes, expected)?;
-                let path = dir.join(format!("{}_{}.tar.gz", w.name, w.version));
-                std::fs::write(&path, &bytes).map_err(io_err(&path))?;
-                Ok((path, Some(hex(&Sha256::digest(&bytes)))))
+                    });
+                };
+                let Some((owner, repo)) = github::parse_url(&remote.url) else {
+                    return Err(InstallError::SourceUnavailable {
+                        name: w.name.clone(),
+                        version: w.version.clone(),
+                        from: format!(
+                            "{url} any more, and its Git origin ({}) is not on GitHub, so it cannot be rebuilt",
+                            remote.url
+                        ),
+                    });
+                };
+                let path = self.unpack_github(
+                    w,
+                    &owner,
+                    &repo,
+                    &remote.sha,
+                    remote.subdir.as_deref(),
+                    dir,
+                )?;
+                Ok(Fetched {
+                    path,
+                    sha256: None,
+                    git: true,
+                })
             }
             Origin::GitHub {
                 owner,
                 repo,
                 commit,
                 ..
-            } => {
-                let bytes = self.github.tarball(owner, repo, commit)?;
-                // GitHub's top directory is `<repo>-<commit>`; R expects the package's name.
-                let unpack = dir.join(format!("gh-{}", w.name));
-                tar::Archive::new(flate2::read::GzDecoder::new(bytes.as_slice()))
-                    .unpack(&unpack)
-                    .map_err(io_err(&unpack))?;
-                let top = std::fs::read_dir(&unpack)
-                    .map_err(io_err(&unpack))?
-                    .flatten()
-                    .find(|e| e.path().is_dir())
-                    .map(|e| e.path())
-                    .ok_or_else(|| InstallError::SourceUnavailable {
-                        name: w.name.clone(),
-                        version: w.version.clone(),
-                        from: format!("{owner}/{repo} at {commit} (the download is empty)"),
-                    })?;
-                let source = unpack.join(&w.name);
-                std::fs::rename(&top, &source).map_err(io_err(&source))?;
-                Ok((source, None))
-            }
+            } => Ok(Fetched {
+                path: self.unpack_github(w, owner, repo, commit, None, dir)?,
+                sha256: None,
+                git: false,
+            }),
         }
+    }
+
+    /// Downloads a GitHub commit and returns the package's directory, renamed to the package's
+    /// name as R expects (GitHub's top directory is `<repo>-<commit>`).
+    fn unpack_github(
+        &self,
+        w: &Wanted,
+        owner: &str,
+        repo: &str,
+        commit: &str,
+        subdir: Option<&str>,
+        dir: &Path,
+    ) -> Result<PathBuf, InstallError> {
+        let unavailable = |why: &str| InstallError::SourceUnavailable {
+            name: w.name.clone(),
+            version: w.version.clone(),
+            from: format!("{owner}/{repo} at {commit} ({why})"),
+        };
+        if let Some(d) = subdir
+            && Path::new(d)
+                .components()
+                .any(|c| !matches!(c, std::path::Component::Normal(_)))
+        {
+            return Err(unavailable(&format!("invalid subdirectory `{d}`")));
+        }
+        let bytes = self.github.tarball(owner, repo, commit)?;
+        let unpack = dir.join(format!("gh-{}", w.name));
+        tar::Archive::new(flate2::read::GzDecoder::new(bytes.as_slice()))
+            .unpack(&unpack)
+            .map_err(io_err(&unpack))?;
+        let top = std::fs::read_dir(&unpack)
+            .map_err(io_err(&unpack))?
+            .flatten()
+            .find(|e| e.path().is_dir())
+            .map(|e| e.path())
+            .ok_or_else(|| unavailable("the download is empty"))?;
+        let package = match subdir {
+            Some(d) => top.join(d),
+            None => top,
+        };
+        if !package.join("DESCRIPTION").is_file() {
+            return Err(unavailable(&match subdir {
+                Some(d) => format!("no DESCRIPTION in `{d}`"),
+                None => "no DESCRIPTION at the top".to_string(),
+            }));
+        }
+        let source = unpack.join(&w.name);
+        std::fs::rename(&package, &source).map_err(io_err(&source))?;
+        Ok(source)
     }
 
     /// Downloads a CRAN source tarball, preferring CRAN (so it can be checked against the
@@ -431,6 +548,7 @@ impl Context<'_> {
         w: &Wanted,
         source: &Path,
         available: &HashMap<String, PathBuf>,
+        git: bool,
     ) -> Result<PathBuf, InstallError> {
         let tmp = self.cache.temp_dir()?;
         let (deps, out, empty) = (
@@ -477,9 +595,14 @@ impl Context<'_> {
                 hint: build_hint(&text),
             });
         }
+        let key = if git {
+            git_key(&self.build_key(w))
+        } else {
+            self.build_key(w)
+        };
         Ok(self
             .cache
-            .insert_dir(&w.name, &w.version, &self.build_key(w), &out.join(&w.name))?)
+            .insert_dir(&w.name, &w.version, &key, &out.join(&w.name))?)
     }
 }
 
@@ -618,6 +741,12 @@ fn on_path(cmd: &str) -> bool {
         .is_some_and(|path| std::env::split_paths(&path).any(|d| d.join(cmd).is_file()))
 }
 
+/// The cache key of a release rebuilt from its Git origin: kept apart from builds of the
+/// repository's own tarball, which may differ.
+fn git_key(build_key: &str) -> String {
+    format!("{build_key}-git")
+}
+
 /// The end of the cache key of a package built from a GitHub commit.
 pub fn github_key_suffix(commit: &str) -> String {
     format!("-gh-{}", &commit[..12.min(commit.len())])
@@ -656,6 +785,7 @@ mod tests {
             dependencies: deps.iter().map(|d| d.to_string()).collect(),
             sha256: None,
             env: BTreeMap::new(),
+            remote: None,
         }
     }
 

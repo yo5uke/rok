@@ -158,6 +158,40 @@ impl Ui {
     }
 
     /// Prints a JSON result on stdout when `--json` was given.
+    /// Asks to pick one of `options` (numbered from 1; the first is the default). With `--yes`
+    /// the first is picked; without a terminal it is an error that says how to choose (`hint`).
+    pub fn choose(&self, question: &str, options: &[String], hint: &str) -> anyhow::Result<usize> {
+        if self.yes {
+            return Ok(0);
+        }
+        if !std::io::stdin().is_terminal() {
+            let mut msg = question.to_string();
+            for (i, o) in options.iter().enumerate() {
+                msg.push_str(&format!("\n  {}. {o}", i + 1));
+            }
+            anyhow::bail!("{msg}\nThis needs a choice; {hint}.");
+        }
+        self.line(&format!("{} {question}", self.paint(CYAN, "?")));
+        for (i, o) in options.iter().enumerate() {
+            self.line(&format!("  {}. {o}", i + 1));
+        }
+        loop {
+            let _ = write!(std::io::stderr(), "  Choose 1-{} [1]: ", options.len());
+            let _ = std::io::stderr().flush();
+            let mut answer = String::new();
+            if std::io::stdin().lock().read_line(&mut answer)? == 0 {
+                anyhow::bail!("Cancelled. Nothing was changed.");
+            }
+            match answer.trim() {
+                "" => return Ok(0),
+                a => match a.parse::<usize>() {
+                    Ok(n) if (1..=options.len()).contains(&n) => return Ok(n - 1),
+                    _ => continue,
+                },
+            }
+        }
+    }
+
     pub fn result(&self, value: serde_json::Value) {
         if self.json {
             println!("{value}");

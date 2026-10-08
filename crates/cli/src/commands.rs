@@ -22,7 +22,7 @@ use serde_json::json;
 use crate::ui::{Ui, changes_json};
 
 /// The project for `--project`, or the one containing the current directory.
-fn find_project(dir: Option<&Path>) -> anyhow::Result<Project> {
+pub(crate) fn find_project(dir: Option<&Path>) -> anyhow::Result<Project> {
     let start = match dir {
         Some(d) => d.to_path_buf(),
         None => std::env::current_dir()?,
@@ -35,8 +35,9 @@ fn find_project(dir: Option<&Path>) -> anyhow::Result<Project> {
     })
 }
 
-/// The installed R to use for a project.
-fn project_r(
+/// The installed R to use for a project. If none has the project's minor version, offers to
+/// install the version the project needs (requirements chapter 6).
+pub(crate) fn project_r(
     ui: &Ui,
     env: &Env,
     manifest: &Manifest,
@@ -53,9 +54,16 @@ fn project_r(
         } else {
             found.join(", ")
         };
-        bail!(
-            "This project needs R {minor}, which is not installed (found: {found}).\nInstall R {minor}, or change the project's R version in rok.toml."
-        );
+        ui.warn(&format!(
+            "This project needs R {minor}, which is not installed (found: {found})."
+        ));
+        let (version, why) = crate::rcmd::needed_version(ui, env, manifest, lock)?;
+        if !ui.confirm(&format!("Install R {version} ({why})?"), true)? {
+            bail!(
+                "Install R {minor} with `rok r install`, or move the project to an installed R with `rok r pin`."
+            );
+        }
+        return crate::rcmd::install_r(ui, env, &version, &why);
     };
     if let Some(l) = lock
         && l.r.minor() == minor
@@ -71,7 +79,7 @@ fn project_r(
 
 /// Makes the project library match `lock`, asking first if packages must be built from
 /// source. Records SHA-256 values learned while building in `lock`.
-fn sync_library(
+pub(crate) fn sync_library(
     ui: &Ui,
     env: &Env,
     project: &Project,
@@ -88,8 +96,17 @@ fn sync_library(
             plural(sources.len()),
         ));
         let minor = r.version.minor();
+        let rebuilds = plan.rebuilds();
         for w in &sources {
             let why = match &w.origin {
+                Origin::Repository { alias, .. } if rebuilds.contains(w) => {
+                    let remote = w.remote.as_ref().expect("rebuilds have a Git origin");
+                    format!(
+                        "`{alias}` no longer has it; rebuilt from {}@{}",
+                        remote.url,
+                        &remote.sha[..remote.sha.len().min(7)]
+                    )
+                }
                 Origin::Snapshot(_) => format!("no binary for R {minor} on {}", env.platform),
                 Origin::Repository { alias, .. } => {
                     format!("`{alias}` has no binary for R {minor} on {}", env.platform)
@@ -121,10 +138,58 @@ fn sync_library(
     let report = ops::execute_sync(env, &plan, &library, r, &|m| ui.step(m))?;
     ops::record_built_checksums(lock, &report.built);
     ops::record_remotes(lock, &report.paths);
+    ops::record_rebuilt(lock, &report.built);
+    let rebuilt: Vec<String> = report
+        .built
+        .iter()
+        .filter(|b| b.git)
+        .map(|b| b.name.clone())
+        .collect();
+    if !rebuilt.is_empty() {
+        ui.warn(&format!(
+            "Rebuilt from Git: {}. The result may differ from the release the repository distributed.",
+            rebuilt.join(", ")
+        ));
+    }
+    let missing = ops::missing_libraries(&env.platform, &report.paths, r);
+    if !missing.is_empty() {
+        let advice = ops::library_advice(env, lock, &missing, true);
+        explain_missing_libraries(ui, &missing, &advice);
+    }
     Ok(report)
 }
 
-fn summary(ui: &Ui, report: &ops::SyncReport, lock: &Lockfile, start: Instant) {
+/// Shows packages that cannot load until system libraries are installed, and the apt command.
+fn explain_missing_libraries(
+    ui: &Ui,
+    missing: &std::collections::BTreeMap<String, Vec<String>>,
+    advice: &rok_core::syslibs::AptAdvice,
+) {
+    ui.warn(&format!(
+        "{} package{} cannot be loaded until these system libraries are installed:",
+        missing.len(),
+        plural(missing.len())
+    ));
+    for (name, libs) in missing {
+        ui.bullet(&format!("{name}: {}", libs.join(", ")));
+    }
+    if let Some(cmd) = advice.command() {
+        ui.line_plain(&format!("  Run: {cmd}"));
+        if advice.broad {
+            ui.bullet(
+                "These are the development packages P3M lists; they include more than is needed, because apt could not narrow them down.",
+            );
+        }
+    }
+    if !advice.unknown.is_empty() {
+        ui.bullet(&format!(
+            "No system package was found for {}; `apt-file search <library>` can find it.",
+            advice.unknown.join(", ")
+        ));
+    }
+}
+
+pub(crate) fn summary(ui: &Ui, report: &ops::SyncReport, lock: &Lockfile, start: Instant) {
     let n = lock.packages.len();
     let mut detail = Vec::new();
     if report.downloaded > 0 {
@@ -145,7 +210,7 @@ fn summary(ui: &Ui, report: &ops::SyncReport, lock: &Lockfile, start: Instant) {
     ));
 }
 
-fn report_json(
+pub(crate) fn report_json(
     command: &str,
     changes: &[ops::Change],
     report: &ops::SyncReport,
@@ -205,30 +270,7 @@ pub fn init(
 
     let env = Env::from_env()?;
     let installs = env.r_installations();
-    let r = match r.as_deref() {
-        None => installs
-            .iter()
-            .max_by(|a, b| a.version.cmp(&b.version).then(b.kind.cmp(&a.kind)))
-            .cloned()
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "No R installation was found.\nInstall R, then run `rok init` again."
-                )
-            })?,
-        Some("latest") => bail!(
-            "`--r latest` needs R installation support, which is not available yet; give a version such as 4.6."
-        ),
-        Some(v) => {
-            let wanted: Version = v.parse().map_err(|_| {
-                anyhow::anyhow!("`{v}` is not an R version; use the form 4.6 or 4.6.1.")
-            })?;
-            let exact = (wanted.parts().len() == 3).then_some(&wanted);
-            ops::select_r(&installs, &wanted.minor(), exact)
-                .filter(|i| exact.is_none_or(|e| e == &i.version))
-                .cloned()
-                .ok_or_else(|| anyhow::anyhow!("R {wanted} is not installed."))?
-        }
-    };
+    let r = init_r(ui, &env, &installs, r.as_deref())?;
 
     let (date, dates) = env.p3m.resolve_snapshot(None)?;
     if dates.stale {
@@ -275,6 +317,52 @@ pub fn init(
         "snapshot": date,
     }));
     Ok(())
+}
+
+/// The R for a new project: the newest installed one, or the one asked for with `--r`. If it is
+/// not installed, offers to install it (requirements chapter 5, init defaults).
+fn init_r(
+    ui: &Ui,
+    env: &Env,
+    installs: &[RInstallation],
+    asked: Option<&str>,
+) -> anyhow::Result<RInstallation> {
+    use rok_rinstall::Request;
+
+    let request: Option<Request> = asked.map(str::parse).transpose()?;
+    let installed = match &request {
+        None => installs
+            .iter()
+            .max_by(|a, b| a.version.cmp(&b.version).then(b.kind.cmp(&a.kind))),
+        Some(Request::Latest) => None,
+        Some(Request::Minor(m)) => ops::select_r(installs, m, None),
+        Some(Request::Exact(v)) => installs.iter().find(|i| &i.version == v),
+    };
+    if let Some(r) = installed {
+        return Ok(r.clone());
+    }
+    let releases = rok_rinstall::releases(&env.http, &env.dirs)?.versions;
+    let wanted = request.clone().unwrap_or(Request::Latest);
+    let version = wanted
+        .pick(&releases)
+        .ok_or_else(|| rok_rinstall::RInstallError::NoMatch(asked.unwrap_or("latest").into()))?;
+    // `latest` may already be installed.
+    if let Some(r) = installs.iter().find(|i| i.version == version) {
+        return Ok(r.clone());
+    }
+    let why = match (&request, asked) {
+        (None, _) => {
+            ui.info("No R installation was found.");
+            "the newest release".to_string()
+        }
+        (Some(Request::Exact(_)), _) => "as requested".to_string(),
+        (_, Some(a)) => format!("the newest release matching `{a}`"),
+        (_, None) => "the newest release".to_string(),
+    };
+    if !ui.confirm(&format!("Install R {version} ({why})?"), true)? {
+        bail!("Cancelled. Nothing was changed.");
+    }
+    crate::rcmd::install_r(ui, env, &version, &why)
 }
 
 // ---- add ----
@@ -557,9 +645,33 @@ pub fn sync(ui: &Ui, project_dir: Option<&Path>, locked: bool) -> anyhow::Result
     let old_lock = project.read_lock()?;
     let env = Env::from_env()?;
     let r = project_r(ui, &env, &manifest, old_lock.as_ref())?;
+    let (lock, changes, report) =
+        sync_project(ui, &env, &project, &manifest, old_lock, &r, locked)?;
+    ui.changes(&changes);
+    if !report.link.removed.is_empty() {
+        ui.info(&format!(
+            "Removed from the library: {}",
+            report.link.removed.join(", ")
+        ));
+    }
+    summary(ui, &report, &lock, start);
+    ui.result(report_json("sync", &changes, &report));
+    Ok(())
+}
+
+/// Updates rok.lock if rok.toml changed (unless `locked`), then makes the library match it.
+fn sync_project(
+    ui: &Ui,
+    env: &Env,
+    project: &Project,
+    manifest: &Manifest,
+    old_lock: Option<Lockfile>,
+    r: &RInstallation,
+    locked: bool,
+) -> anyhow::Result<(Lockfile, Vec<ops::Change>, ops::SyncReport)> {
     let current = old_lock
         .as_ref()
-        .filter(|l| ops::lock_is_current(&manifest, l));
+        .filter(|l| ops::lock_is_current(manifest, l));
     let (mut lock, changes, relocked) = match current {
         Some(l) => (l.clone(), Vec::new(), false),
         None if locked => bail!(
@@ -572,25 +684,40 @@ pub fn sync(ui: &Ui, project_dir: Option<&Path>, locked: bool) -> anyhow::Result
                 .filter(|l| l.r.minor() == r.version.minor())
                 .map_or(&r.version, |l| &l.r)
                 .clone();
-            let lock = ops::resolve_lock(&env, &manifest, old_lock.as_ref(), &lock_r)?;
+            let lock = ops::resolve_lock(env, manifest, old_lock.as_ref(), &lock_r)?;
             let changes = ops::diff(old_lock.as_ref(), &lock);
             (lock, changes, true)
         }
     };
     let before = lock.clone();
-    let report = sync_library(ui, &env, &project, &manifest, &mut lock, &r)?;
+    let report = sync_library(ui, env, project, manifest, &mut lock, r)?;
     if relocked || lock != before {
         project.save_lock(&lock)?;
     }
-    ui.changes(&changes);
-    if !report.link.removed.is_empty() {
-        ui.info(&format!(
-            "Removed from the library: {}",
-            report.link.removed.join(", ")
-        ));
+    Ok((lock, changes, report))
+}
+
+/// Before `rok run`: brings rok.lock and the library up to date, saying something only if
+/// anything changed.
+pub(crate) fn ensure_synced(
+    ui: &Ui,
+    env: &Env,
+    project: &Project,
+    manifest: &Manifest,
+    old_lock: Option<Lockfile>,
+    r: &RInstallation,
+) -> anyhow::Result<()> {
+    let start = Instant::now();
+    let (lock, changes, report) = sync_project(ui, env, project, manifest, old_lock, r, false)?;
+    let changed = !changes.is_empty()
+        || report.downloaded > 0
+        || !report.built.is_empty()
+        || !report.link.linked.is_empty()
+        || !report.link.removed.is_empty();
+    if changed {
+        ui.changes(&changes);
+        summary(ui, &report, &lock, start);
     }
-    summary(ui, &report, &lock, start);
-    ui.result(report_json("sync", &changes, &report));
     Ok(())
 }
 
@@ -824,11 +951,45 @@ pub fn status(ui: &Ui, project_dir: Option<&Path>, packages: bool) -> anyhow::Re
     let r = ops::select_r(&installs, &minor, pinned.or(lock.as_ref().map(|l| &l.r)));
     let library = project.library(&minor, &env.platform);
     let entries = status::read_library(&library, env.cache.root());
+    // System libraries (Linux), from the files on disk only: no network.
+    let system = r.map(|r| {
+        let paths: Vec<(String, PathBuf)> = entries
+            .iter()
+            .filter(|(_, i)| {
+                matches!(
+                    i,
+                    status::Installed::Linked {
+                        version: Some(_),
+                        ..
+                    }
+                )
+            })
+            .map(|(n, _)| (n.clone(), library.join(n)))
+            .collect();
+        let packages = ops::missing_libraries(&env.platform, &paths, r);
+        let advice = match &lock {
+            Some(l) if !packages.is_empty() => ops::library_advice(&env, l, &packages, false),
+            _ => Default::default(),
+        };
+        let r_missing = ops::missing_r_libraries(&env.platform, &r.r_home);
+        let r_advice = if r_missing.is_empty() {
+            Default::default()
+        } else {
+            ops::r_library_advice(&r_missing)
+        };
+        status::SystemCheck {
+            r_missing,
+            packages,
+            advice,
+            r_advice,
+        }
+    });
     let problems = status::check(&status::Inputs {
         manifest: &manifest,
         lock: lock.as_ref(),
         r,
         library: &entries,
+        system: system.as_ref(),
     });
     let failing = problems.iter().any(|p| p.level != Level::Info);
 

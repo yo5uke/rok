@@ -9,6 +9,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
 use crate::http::{Http, HttpError};
+use crate::lockfile::Remote;
 use crate::p3m::{Index, IndexEntry};
 use crate::paths::UserDirs;
 use crate::version::Version;
@@ -143,15 +144,20 @@ fn cache_name(contrib: &str) -> String {
         .collect()
 }
 
-/// Reads `RemoteUrl` and `RemoteSha` from an installed package's DESCRIPTION.
-pub fn remote_of(package_dir: &Path) -> Option<(String, String)> {
+/// Reads `RemoteUrl`, `RemoteSha` and `RemoteSubdir` from an installed package's DESCRIPTION.
+pub fn remote_of(package_dir: &Path) -> Option<Remote> {
     let text = std::fs::read_to_string(package_dir.join("DESCRIPTION")).ok()?;
     let records = crate::dcf::parse(&text).ok()?;
     let rec = records.first()?;
-    Some((
-        rec.get("RemoteUrl")?.to_string(),
-        rec.get("RemoteSha")?.to_string(),
-    ))
+    Some(Remote {
+        url: rec.get("RemoteUrl")?.to_string(),
+        sha: rec.get("RemoteSha")?.to_string(),
+        subdir: rec
+            .get("RemoteSubdir")
+            .filter(|d| !d.is_empty() && *d != ".")
+            .map(str::to_string),
+        rebuilt: false,
+    })
 }
 
 #[cfg(test)]

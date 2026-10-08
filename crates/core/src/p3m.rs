@@ -5,7 +5,7 @@
 //! date (the Linux binary index is identical); a dated index never changes, so it is cached
 //! forever; the index lists R-devel's recommended packages a second time with a `Path` field.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
@@ -41,7 +41,8 @@ struct PackageInfo {
 
 #[derive(Debug, Clone, Deserialize, serde::Serialize)]
 struct ArchivedRelease {
-    version: String,
+    /// Missing for some very old releases (nlme has entries with `"version": null`).
+    version: Option<String>,
     date_publication: Option<String>,
 }
 
@@ -160,6 +161,11 @@ impl P3m {
         }
     }
 
+    /// This server's cache directory.
+    pub fn cache_dir(&self) -> &Path {
+        &self.cache
+    }
+
     /// The base of dated CRAN snapshots (`<server>/cran`), as written to lockfiles.
     pub fn cran_base(&self) -> String {
         format!("{}/cran", self.base)
@@ -222,6 +228,85 @@ impl P3m {
         Ok(Some(info.checksum))
     }
 
+    /// P3M's system requirements (`-dev` packages and tools to install with the distribution's
+    /// package manager) of `names` and of their dependencies, for a distribution such as
+    /// (`ubuntu`, `24.04`). Packages without requirements are left out. Answers are cached for
+    /// a day, so resolving again does not wait for the network.
+    pub fn sysreqs(
+        &self,
+        names: &[&str],
+        distribution: &str,
+        release: &str,
+    ) -> Result<BTreeMap<String, Vec<String>>, P3mError> {
+        #[derive(Deserialize)]
+        struct Response {
+            requirements: Vec<Entry>,
+        }
+        #[derive(Deserialize)]
+        struct Entry {
+            name: String,
+            requirements: Requirements,
+        }
+        #[derive(Deserialize)]
+        struct Requirements {
+            #[serde(default)]
+            packages: Vec<String>,
+        }
+        /// A cached answer: when it was fetched (seconds since the epoch) and the packages.
+        type Cached = BTreeMap<String, (u64, Vec<String>)>;
+
+        let path = self
+            .cache
+            .join("sysreqs")
+            .join(format!("{distribution}-{release}.json"));
+        let mut cached: Cached = std::fs::read(&path)
+            .ok()
+            .and_then(|b| serde_json::from_slice(&b).ok())
+            .unwrap_or_default();
+        let now = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+        let fresh = |at: u64| now.saturating_sub(at) < PACKAGE_INFO_MAX_AGE.as_secs();
+        let stale: Vec<&str> = names
+            .iter()
+            .copied()
+            .filter(|n| !cached.get(*n).is_some_and(|(at, _)| fresh(*at)))
+            .collect();
+        // Keep URLs short: P3M accepts many names per request, proxies may not.
+        for chunk in stale.chunks(100) {
+            let mut url = format!(
+                "{}/__api__/repos/cran/sysreqs?all=false&distribution={distribution}&release={release}",
+                self.base
+            );
+            for n in chunk {
+                url.push_str("&pkgname=");
+                url.push_str(n);
+            }
+            let body = self.http.get_bytes(&url, None)?;
+            let r: Response = serde_json::from_slice(&body).map_err(|e| P3mError::Response {
+                url: url.clone(),
+                message: e.to_string(),
+            })?;
+            // The answer also lists dependencies; packages asked about but absent need nothing.
+            for n in chunk {
+                cached.insert(n.to_string(), (now, Vec::new()));
+            }
+            for e in r.requirements {
+                cached.insert(e.name, (now, e.requirements.packages));
+            }
+        }
+        if !stale.is_empty() {
+            write_atomic(&path, &serde_json::to_vec(&cached).expect("serializable"))?;
+        }
+        Ok(names
+            .iter()
+            .filter_map(|n| {
+                let (_, packages) = cached.get(*n)?;
+                (!packages.is_empty()).then(|| (n.to_string(), packages.clone()))
+            })
+            .collect())
+    }
+
     /// The CRAN releases of a package with their publication times (UTC, RFC 3339), oldest
     /// first. Releases without a publication time are left out (V10).
     pub fn history(&self, name: &str) -> Result<Vec<(Version, String)>, P3mError> {
@@ -229,13 +314,13 @@ impl P3m {
             return Ok(Vec::new());
         };
         let mut out: Vec<(Version, String)> =
-            std::iter::once((info.version, info.date_publication))
+            std::iter::once((Some(info.version), info.date_publication))
                 .chain(
                     info.archived
                         .into_iter()
                         .map(|a| (a.version, a.date_publication)),
                 )
-                .filter_map(|(v, d)| Some((v.parse().ok()?, d?)))
+                .filter_map(|(v, d)| Some((v?.parse().ok()?, d?)))
                 .collect();
         out.sort_by(|a, b| a.1.cmp(&b.1));
         Ok(out)
@@ -527,6 +612,15 @@ fn entry_from_record(rec: &dcf::Record) -> Result<IndexEntry, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reads_package_info_with_missing_archived_versions() {
+        let json = r#"{"version": "3.1-171", "checksum": "ab", "date_publication": "2026-09-01T09:55:28Z",
+            "archived": [{"version": null, "date_publication": null}, {"version": "3.1-170", "date_publication": "2026-07-15T12:14:44Z"}]}"#;
+        let info: PackageInfo = serde_json::from_str(json).unwrap();
+        assert_eq!(info.archived.len(), 2);
+        assert_eq!(info.archived[0].version, None);
+    }
 
     fn dates(list: &[&str]) -> Vec<String> {
         list.iter().map(|s| s.to_string()).collect()

@@ -221,6 +221,15 @@ impl<'a> GitHub<'a> {
     }
 }
 
+/// The owner and repository of a GitHub URL (`https://github.com/owner/repo[.git]`).
+pub fn parse_url(url: &str) -> Option<(String, String)> {
+    let rest = url
+        .strip_prefix("https://github.com/")
+        .or_else(|| url.strip_prefix("http://github.com/"))?;
+    let rest = rest.trim_end_matches('/');
+    crate::manifest::parse_github(rest.strip_suffix(".git").unwrap_or(rest))
+}
+
 /// Splits `owner/repo` or `owner/repo@ref`.
 pub fn parse_spec(spec: &str) -> Option<(String, String, Option<String>)> {
     let (repo_part, reference) = match spec.split_once('@') {
@@ -249,5 +258,10 @@ mod tests {
         assert_eq!(parse_spec("yo5uke/coresynth@"), None);
         assert_eq!(parse_spec("coresynth"), None);
         assert_eq!(parse_spec("a/b/c"), None);
+        assert_eq!(
+            parse_url("https://github.com/pola-rs/r-polars.git"),
+            Some(("pola-rs".into(), "r-polars".into()))
+        );
+        assert_eq!(parse_url("https://gitlab.com/a/b"), None);
     }
 }

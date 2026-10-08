@@ -3,10 +3,13 @@
 //! A thin wrapper over a blocking `ureq` agent. Requests follow redirects (P3M redirects
 //! downloads to a CDN), honour the usual proxy variables, and return errors that name the URL.
 
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 /// Largest response body rok reads into memory (package indexes are a few MB).
 const MAX_BODY: u64 = 512 * 1024 * 1024;
+/// Largest file rok downloads to disk (R itself is about 110 MB).
+const MAX_DOWNLOAD: u64 = 4 * 1024 * 1024 * 1024;
 
 #[derive(Debug, thiserror::Error)]
 pub enum HttpError {
@@ -17,6 +20,12 @@ pub enum HttpError {
         url: String,
         #[source]
         source: Box<ureq::Error>,
+    },
+    #[error("{path}: {source}")]
+    Io {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
     },
 }
 
@@ -100,6 +109,34 @@ impl Http {
             .limit(MAX_BODY)
             .read_to_vec()
             .map_err(transport)
+    }
+
+    /// GET `url` into the file `path` without holding the body in memory. Returns the size.
+    pub fn download(&self, url: &str, path: &Path) -> Result<u64, HttpError> {
+        let mut resp = self
+            .agent
+            .get(url)
+            .call()
+            .map_err(|source| HttpError::Transport {
+                url: url.to_string(),
+                source: Box::new(source),
+            })?;
+        let status = resp.status().as_u16();
+        if !(200..300).contains(&status) {
+            return Err(HttpError::Status {
+                url: url.to_string(),
+                status,
+            });
+        }
+        let io = |source| HttpError::Io {
+            path: path.to_path_buf(),
+            source,
+        };
+        let mut file = std::fs::File::create(path).map_err(io)?;
+        let mut reader = resp.body_mut().with_config().limit(MAX_DOWNLOAD).reader();
+        let size = std::io::copy(&mut reader, &mut file).map_err(io)?;
+        file.sync_all().map_err(io)?;
+        Ok(size)
     }
 
     /// HEAD `url`. Any status is returned as a [`Head`]; only transport failures are errors.

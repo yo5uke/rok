@@ -58,6 +58,9 @@ pub struct LockedPackage {
     pub sha256: Option<String>,
     /// Environment variables set when building from source (they change the result).
     pub env: BTreeMap<String, String>,
+    /// System requirements from P3M by distribution (`ubuntu-24.04` → `-dev` packages), so
+    /// missing libraries can be explained without the network.
+    pub sysreqs: BTreeMap<String, Vec<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -82,11 +85,17 @@ pub enum Source {
     },
 }
 
-/// The Git origin of a package (`RemoteUrl` and `RemoteSha` in its DESCRIPTION).
+/// The Git origin of a package (`RemoteUrl`, `RemoteSha` and `RemoteSubdir` in its
+/// DESCRIPTION).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Remote {
     pub url: String,
     pub sha: String,
+    /// The package's directory in the Git repository, if not the top.
+    pub subdir: Option<String>,
+    /// The repository no longer had this release, so it was rebuilt from this commit; the
+    /// result may differ from the tarball the repository distributed (requirements, chapter 7).
+    pub rebuilt: bool,
 }
 
 impl Source {
@@ -180,6 +189,8 @@ struct RawPackage {
     sha256: Option<String>,
     #[serde(default)]
     env: BTreeMap<String, String>,
+    #[serde(default)]
+    sysreqs: BTreeMap<String, Vec<String>>,
 }
 
 #[derive(Deserialize)]
@@ -190,6 +201,9 @@ struct RawSource {
     snapshot: Option<String>,
     remote_url: Option<String>,
     remote_sha: Option<String>,
+    remote_subdir: Option<String>,
+    #[serde(default)]
+    rebuilt_from_git: bool,
     github: Option<String>,
     branch: Option<String>,
     tag: Option<String>,
@@ -221,8 +235,18 @@ impl RawSource {
                     ));
                 }
                 let remote = match (self.remote_url, self.remote_sha) {
-                    (Some(url), Some(sha)) => Some(Remote { url, sha }),
-                    (None, None) => None,
+                    (Some(url), Some(sha)) => Some(Remote {
+                        url,
+                        sha,
+                        subdir: self.remote_subdir,
+                        rebuilt: self.rebuilt_from_git,
+                    }),
+                    (None, None) if self.remote_subdir.is_none() && !self.rebuilt_from_git => None,
+                    (None, None) => {
+                        return Err(invalid(
+                            "`remote-subdir` and `rebuilt-from-git` need `remote-url` and `remote-sha`",
+                        ));
+                    }
                     _ => return Err(invalid("`remote-url` and `remote-sha` go together")),
                 };
                 Ok(Source::Repository {
@@ -252,6 +276,8 @@ impl RawSource {
                     || self.snapshot.is_some()
                     || self.remote_url.is_some()
                     || self.remote_sha.is_some()
+                    || self.remote_subdir.is_some()
+                    || self.rebuilt_from_git
                 {
                     return Err(invalid(
                         "`url`, `snapshot` and `remote-*` belong to repository sources",
@@ -334,6 +360,7 @@ impl Lockfile {
                 dependencies: p.dependencies,
                 sha256: p.sha256,
                 env: p.env,
+                sysreqs: p.sysreqs,
             });
         }
         let mut seen = std::collections::HashSet::new();
@@ -433,6 +460,12 @@ impl Lockfile {
                     if let Some(r) = remote {
                         source.insert("remote-url", r.url.as_str().into());
                         source.insert("remote-sha", r.sha.as_str().into());
+                        if let Some(d) = &r.subdir {
+                            source.insert("remote-subdir", d.as_str().into());
+                        }
+                        if r.rebuilt {
+                            source.insert("rebuilt-from-git", true.into());
+                        }
                     }
                 }
                 Source::GitHub {
@@ -468,6 +501,13 @@ impl Lockfile {
                     env.insert(k, v.as_str().into());
                 }
                 t["env"] = value(env);
+            }
+            if !p.sysreqs.is_empty() {
+                let mut reqs = InlineTable::new();
+                for (distro, packages) in &p.sysreqs {
+                    reqs.insert(distro, sorted_array(packages).into());
+                }
+                t["sysreqs"] = value(reqs);
             }
             array.push(t);
         }
@@ -549,10 +589,11 @@ dependencies = []
 [[package]]
 name = "polars"
 version = "1.16.0"
-source = { repository = "multiverse", url = "https://community.r-multiverse.org", remote-url = "https://github.com/pola-rs/r-polars", remote-sha = "abc" }
+source = { repository = "multiverse", url = "https://community.r-multiverse.org", remote-url = "https://github.com/pola-rs/r-polars", remote-sha = "abc", remote-subdir = "pkg", rebuilt-from-git = true }
 dependencies = []
 sha256 = "f263f133f75fc9501c356e24cf2a0fac1dfa0d6d01a121ef3eaa79d9886bbd22"
 env = { NOT_CRAN = "true" }
+sysreqs = { "ubuntu-24.04" = ["cargo", "rustc"] }
 "#;
 
     #[test]

@@ -12,6 +12,7 @@ publish = false
 
 [workspace.dependencies]
 rok-core = { path = "crates/core" }
+rok-rinstall = { path = "crates/rinstall" }
 anyhow = "1.0.104"
 clap = { version = "4.6.7", features = ["derive"] }
 serde = { version = "1.0.229", features = ["derive"] }

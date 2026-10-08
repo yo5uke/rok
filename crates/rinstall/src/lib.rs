@@ -1,1 +1,612 @@
-//! Installation of R itself (step 1-8 of the roadmap).
+//! Installation of R itself (requirements chapter 6; V1 and V1b).
+//!
+//! R comes from Posit's builds. On Linux the portable build (`manylinux_2_34`: it bundles its
+//! libraries and runs wherever it is unpacked, on glibc 2.34 or later) comes first. Where it
+//! cannot be used, the build for the distribution is unpacked and the paths compiled into it
+//! are rewritten. Nothing needs administrator rights; rok installs into `<data>/r/<version>`.
+
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::str::FromStr;
+use std::time::{Duration, SystemTime};
+
+use rok_core::http::{Http, HttpError};
+use rok_core::paths::UserDirs;
+use rok_core::platform::{Arch, LinuxDistro, Os, Platform};
+use rok_core::rdetect::{self, RInstallation, RKind};
+use rok_core::version::Version;
+
+/// Where Posit publishes its R builds.
+pub const BUILDS_URL: &str = "https://cdn.posit.co/r";
+
+/// How long the list of R releases is reused before it is downloaded again.
+const RELEASES_MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
+
+#[derive(Debug, thiserror::Error)]
+pub enum RInstallError {
+    #[error(transparent)]
+    Http(#[from] HttpError),
+    #[error("{path}: {source}")]
+    Io {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("R {version} is already installed at {}", path.display())]
+    AlreadyInstalled { version: Version, path: PathBuf },
+    #[error("R {version} is not installed by rok (rok removes only the R versions it installed)")]
+    NotManaged { version: Version },
+    #[error("no R release matches `{0}`; run `rok r list` to see the available versions")]
+    NoMatch(String),
+    #[error("`{0}` is not an R version; use the form 4.6, 4.6.1 or latest")]
+    BadRequest(String),
+    #[error("R {version} is not available for this machine:\n{reasons}")]
+    Unavailable { version: Version, reasons: String },
+    #[error("installing R is not supported on {0} yet")]
+    Unsupported(String),
+    #[error("the installed R {version} does not work: {message}")]
+    Broken { version: Version, message: String },
+    #[error("unexpected response from {url}: {message}")]
+    Response { url: String, message: String },
+}
+
+fn io_err(path: &Path) -> impl FnOnce(std::io::Error) -> RInstallError + '_ {
+    move |source| RInstallError::Io {
+        path: path.to_path_buf(),
+        source,
+    }
+}
+
+// ---- which version ----
+
+/// An R version as the user asks for it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Request {
+    /// The newest release.
+    Latest,
+    /// The newest patch of a minor version (`4.5`).
+    Minor(String),
+    /// Exactly this version (`4.5.1`).
+    Exact(Version),
+}
+
+impl FromStr for Request {
+    type Err = RInstallError;
+
+    fn from_str(s: &str) -> Result<Request, RInstallError> {
+        let s = s.trim();
+        if s.eq_ignore_ascii_case("latest") {
+            return Ok(Request::Latest);
+        }
+        let bad = || RInstallError::BadRequest(s.to_string());
+        let v: Version = s.parse().map_err(|_| bad())?;
+        match v.parts().len() {
+            2 => Ok(Request::Minor(v.minor())),
+            3 => Ok(Request::Exact(v)),
+            _ => Err(bad()),
+        }
+    }
+}
+
+impl Request {
+    /// The release to install: the newest that matches, from `releases` (newest first).
+    pub fn pick(&self, releases: &[Version]) -> Option<Version> {
+        releases.iter().find(|v| self.matches(v)).cloned()
+    }
+
+    /// Whether an R version satisfies the request (any version for [`Request::Latest`]).
+    pub fn matches(&self, v: &Version) -> bool {
+        match self {
+            Request::Latest => true,
+            Request::Minor(m) => v.minor() == *m,
+            Request::Exact(e) => v == e,
+        }
+    }
+}
+
+/// The R releases Posit builds, newest first.
+#[derive(Debug, Clone)]
+pub struct Releases {
+    pub versions: Vec<Version>,
+    /// The list could not be downloaded, so an older copy was used.
+    pub stale: bool,
+}
+
+/// The R releases (from Posit's `versions.json`, cached for a day). Development builds
+/// (`devel`, `next`) are left out.
+pub fn releases(http: &Http, dirs: &UserDirs) -> Result<Releases, RInstallError> {
+    let path = dirs.cache.join("r").join("versions.json");
+    let cached = std::fs::read(&path).ok();
+    let age = std::fs::metadata(&path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| SystemTime::now().duration_since(t).ok());
+    let url = format!("{BUILDS_URL}/versions.json");
+    let (body, stale) = match (&cached, age) {
+        (Some(b), Some(age)) if age < RELEASES_MAX_AGE => (b.clone(), false),
+        _ => match http.get_bytes(&url, None) {
+            Ok(b) => {
+                rok_core::fsutil::write_atomic(&path, &b).map_err(io_err(&path))?;
+                (b, false)
+            }
+            Err(e) => (cached.ok_or(e)?, true),
+        },
+    };
+    #[derive(serde::Deserialize)]
+    struct List {
+        r_versions: Vec<String>,
+    }
+    let list: List = serde_json::from_slice(&body).map_err(|e| RInstallError::Response {
+        url: url.clone(),
+        message: e.to_string(),
+    })?;
+    let mut versions: Vec<Version> = list
+        .r_versions
+        .iter()
+        .filter_map(|v| v.parse::<Version>().ok())
+        .filter(|v| v.parts().len() == 3)
+        .collect();
+    versions.sort_by(|a, b| b.cmp(a));
+    Ok(Releases { versions, stale })
+}
+
+// ---- which build ----
+
+/// A kind of R build.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BuildKind {
+    /// Posit's portable build: libraries bundled, runs where it is unpacked.
+    Portable,
+    /// The build for a distribution (`ubuntu-2404`); its paths are rewritten after unpacking.
+    Distribution(String),
+}
+
+impl std::fmt::Display for BuildKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            BuildKind::Portable => f.write_str("portable build"),
+            BuildKind::Distribution(d) => write!(f, "{d} build"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Build {
+    pub kind: BuildKind,
+    pub url: String,
+}
+
+/// The glibc version, from `getconf GNU_LIBC_VERSION` (`glibc 2.39`). `None` on other C
+/// libraries (musl).
+pub fn glibc_version() -> Option<(u32, u32)> {
+    let out = Command::new("getconf")
+        .arg("GNU_LIBC_VERSION")
+        .output()
+        .ok()?;
+    parse_glibc(&String::from_utf8_lossy(&out.stdout))
+}
+
+fn parse_glibc(text: &str) -> Option<(u32, u32)> {
+    let v = text.trim().strip_prefix("glibc ")?;
+    let mut parts = v.split('.');
+    Some((parts.next()?.parse().ok()?, parts.next()?.parse().ok()?))
+}
+
+/// Posit's name for a distribution's builds (`ubuntu-2404`, `debian-12`, `rhel-9`).
+pub fn distribution_name(d: &LinuxDistro) -> Option<String> {
+    let major = d.version_id.split('.').next().unwrap_or("");
+    match d.id.as_str() {
+        "ubuntu" => Some(format!("ubuntu-{}", d.version_id.replace('.', ""))),
+        "debian" => Some(format!("debian-{major}")),
+        "rhel" | "rocky" | "almalinux" | "centos" => match major {
+            "7" | "8" => Some(format!("centos-{major}")),
+            "" => None,
+            m => Some(format!("rhel-{m}")),
+        },
+        "opensuse-leap" | "sles" => Some(format!("opensuse-{}", d.version_id.replace('.', ""))),
+        "fedora" => Some(format!("fedora-{major}")),
+        // Ubuntu derivatives use the builds of the Ubuntu release they are based on.
+        _ => match d.ubuntu_codename.as_deref()? {
+            "focal" => Some("ubuntu-2004".into()),
+            "jammy" => Some("ubuntu-2204".into()),
+            "noble" => Some("ubuntu-2404".into()),
+            "resolute" => Some("ubuntu-2604".into()),
+            _ => None,
+        },
+    }
+}
+
+/// The builds of R `version` that can run on this machine, best first.
+pub fn builds(
+    platform: &Platform,
+    glibc: Option<(u32, u32)>,
+    version: &Version,
+) -> Result<Vec<Build>, RInstallError> {
+    if platform.os != Os::Linux {
+        return Err(RInstallError::Unsupported(format!("{:?}", platform.os)));
+    }
+    let arm = if platform.arch == Arch::Aarch64 {
+        "-arm64"
+    } else {
+        ""
+    };
+    let mut out = Vec::new();
+    if glibc.is_some_and(|v| v >= (2, 34)) {
+        out.push(Build {
+            kind: BuildKind::Portable,
+            url: format!("{BUILDS_URL}/manylinux_2_34/R-{version}-manylinux_2_34{arm}.tar.gz"),
+        });
+    }
+    if let Some(name) = platform.distro.as_ref().and_then(distribution_name) {
+        out.push(Build {
+            url: format!("{BUILDS_URL}/{name}/R-{version}-{name}{arm}.tar.gz"),
+            kind: BuildKind::Distribution(name),
+        });
+    }
+    Ok(out)
+}
+
+/// Commands that install R `version` system-wide into `/opt/R/<version>` with the
+/// distribution's package manager. rok only shows them: they need administrator rights.
+pub fn system_install_commands(platform: &Platform, version: &Version) -> Option<Vec<String>> {
+    let d = platform.distro.as_ref()?;
+    let name = distribution_name(d)?;
+    let like = |x: &str| d.id == x || d.id_like.iter().any(|l| l == x);
+    if like("debian") || like("ubuntu") {
+        let arch = if platform.arch == Arch::Aarch64 {
+            "arm64"
+        } else {
+            "amd64"
+        };
+        let file = format!("r-{version}_1_{arch}.deb");
+        Some(vec![
+            format!("curl -fLO {BUILDS_URL}/{name}/pkgs/{file}"),
+            format!("sudo apt-get install -y ./{file}"),
+        ])
+    } else if like("rhel") || like("fedora") || like("centos") {
+        let arch = platform.arch.r_name();
+        Some(vec![format!(
+            "sudo dnf install -y {BUILDS_URL}/{name}/pkgs/R-{version}-1-1.{arch}.rpm"
+        )])
+    } else {
+        None
+    }
+}
+
+// ---- installing ----
+
+/// An R installed by rok.
+#[derive(Debug, Clone)]
+pub struct Installed {
+    pub installation: RInstallation,
+    pub build: BuildKind,
+}
+
+/// The directory of a managed R version.
+pub fn install_dir(dirs: &UserDirs, version: &Version) -> PathBuf {
+    dirs.r_installs().join(version.as_str())
+}
+
+/// Installs R `version` into `<data>/r/<version>`. `progress` receives one line per step.
+pub fn install(
+    http: &Http,
+    dirs: &UserDirs,
+    platform: &Platform,
+    version: &Version,
+    progress: &dyn Fn(&str),
+) -> Result<Installed, RInstallError> {
+    let target = install_dir(dirs, version);
+    if target.exists() {
+        return Err(RInstallError::AlreadyInstalled {
+            version: version.clone(),
+            path: target,
+        });
+    }
+    let candidates = builds(platform, glibc_version(), version)?;
+    let mut reasons = Vec::new();
+    let mut chosen = None;
+    for b in candidates {
+        match http.head(&b.url, None)? {
+            h if h.status == 200 => {
+                chosen = Some(b);
+                break;
+            }
+            h => reasons.push(format!("  • {}: {} (HTTP {})", b.kind, b.url, h.status)),
+        }
+    }
+    let Some(build) = chosen else {
+        if reasons.is_empty() {
+            reasons
+                .push("  • no Posit build fits this Linux distribution and C library".to_string());
+        }
+        return Err(RInstallError::Unavailable {
+            version: version.clone(),
+            reasons: reasons.join("\n"),
+        });
+    };
+
+    install_build(http, dirs, &build, version, progress)
+}
+
+/// Installs one particular build of R `version` into `<data>/r/<version>`.
+pub fn install_build(
+    http: &Http,
+    dirs: &UserDirs,
+    build: &Build,
+    version: &Version,
+    progress: &dyn Fn(&str),
+) -> Result<Installed, RInstallError> {
+    let target = install_dir(dirs, version);
+    if target.exists() {
+        return Err(RInstallError::AlreadyInstalled {
+            version: version.clone(),
+            path: target,
+        });
+    }
+    let root = dirs.r_installs();
+    std::fs::create_dir_all(&root).map_err(io_err(&root))?;
+    // Work next to the target, so the final rename stays on one file system.
+    let work = tempfile::Builder::new()
+        .prefix(".install-")
+        .tempdir_in(&root)
+        .map_err(io_err(&root))?;
+    let tarball = work.path().join("R.tar.gz");
+    progress(&format!("Downloading R {version} ({})", build.kind));
+    http.download(&build.url, &tarball)?;
+    progress(&format!("Unpacking R {version}"));
+    let unpack = work.path().join("unpack");
+    let file = std::fs::File::open(&tarball).map_err(io_err(&tarball))?;
+    tar::Archive::new(flate2::read::GzDecoder::new(file))
+        .unpack(&unpack)
+        .map_err(io_err(&unpack))?;
+    let top = unpack.join(version.as_str());
+    if !top.join("bin").join("R").is_file() {
+        return Err(RInstallError::Broken {
+            version: version.clone(),
+            message: format!("{} has no {version}/bin/R", build.url),
+        });
+    }
+    if let BuildKind::Distribution(_) = &build.kind {
+        relocate(&top, &format!("/opt/R/{version}"), &target)?;
+    }
+    std::fs::rename(&top, &target).map_err(io_err(&target))?;
+
+    let r_home = target.join("lib").join("R");
+    match rdetect::r_home_version(&r_home) {
+        Some(v) if v == *version => {}
+        found => {
+            let _ = std::fs::remove_dir_all(&target);
+            return Err(RInstallError::Broken {
+                version: version.clone(),
+                message: format!("its base package reports version {found:?}"),
+            });
+        }
+    }
+    Ok(Installed {
+        installation: RInstallation {
+            version: version.clone(),
+            executable: target.join("bin").join("R"),
+            r_home,
+            kind: RKind::Managed,
+        },
+        build: build.kind.clone(),
+    })
+}
+
+/// The text files of a distribution build with its install prefix compiled in (V1).
+const PREFIX_FILES: [&str; 4] = [
+    "bin/R",
+    "lib/R/bin/R",
+    "lib/pkgconfig/libR.pc",
+    "lib/R/etc/Makeconf",
+];
+
+/// Makes a distribution build work at `to` instead of `from` (`/opt/R/<version>`): rewrites the
+/// prefix in its scripts, and replaces `Rscript`, whose R_HOME is compiled in, with wrappers
+/// that pass `RHOME`. The original binary must not go to `bin/exec/`, which R CMD INSTALL
+/// takes for sub-architectures (V1).
+pub fn relocate(dir: &Path, from: &str, to: &Path) -> Result<(), RInstallError> {
+    let to_str = to.to_string_lossy();
+    for f in PREFIX_FILES {
+        let path = dir.join(f);
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        std::fs::write(&path, text.replace(from, &to_str)).map_err(io_err(&path))?;
+    }
+    let bin = dir.join("lib/R/bin");
+    let original = bin.join("Rscript.orig");
+    std::fs::rename(bin.join("Rscript"), &original).map_err(io_err(&original))?;
+    let wrapper = format!(
+        "#!/bin/sh\n# rok: Rscript has its original R_HOME compiled in, so pass RHOME.\nRHOME=\"{to_str}/lib/R\" exec \"{to_str}/lib/R/bin/Rscript.orig\" \"$@\"\n"
+    );
+    for path in [dir.join("bin/Rscript"), bin.join("Rscript")] {
+        let _ = std::fs::remove_file(&path);
+        std::fs::write(&path, &wrapper).map_err(io_err(&path))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+                .map_err(io_err(&path))?;
+        }
+    }
+    Ok(())
+}
+
+/// Removes an R installed by rok.
+pub fn uninstall(dirs: &UserDirs, version: &Version) -> Result<PathBuf, RInstallError> {
+    let target = install_dir(dirs, version);
+    if !target.join("bin").is_dir() {
+        return Err(RInstallError::NotManaged {
+            version: version.clone(),
+        });
+    }
+    // Move it aside first, so a failure halfway leaves no half-removed R in the list.
+    let trash = dirs
+        .r_installs()
+        .join(format!(".remove-{version}-{}", std::process::id()));
+    std::fs::rename(&target, &trash).map_err(io_err(&target))?;
+    std::fs::remove_dir_all(&trash).map_err(io_err(&trash))?;
+    Ok(target)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn v(s: &str) -> Version {
+        s.parse().unwrap()
+    }
+
+    #[test]
+    fn parses_requests() {
+        assert_eq!("latest".parse::<Request>().unwrap(), Request::Latest);
+        assert_eq!(
+            "4.5".parse::<Request>().unwrap(),
+            Request::Minor("4.5".into())
+        );
+        assert_eq!(
+            "4.5.1".parse::<Request>().unwrap(),
+            Request::Exact(v("4.5.1"))
+        );
+        assert!("4".parse::<Request>().is_err());
+        assert!("four".parse::<Request>().is_err());
+        let releases = [v("4.6.1"), v("4.6.0"), v("4.5.3"), v("4.5.2")];
+        assert_eq!(Request::Latest.pick(&releases), Some(v("4.6.1")));
+        assert_eq!(
+            Request::Minor("4.5".into()).pick(&releases),
+            Some(v("4.5.3"))
+        );
+        assert_eq!(Request::Exact(v("4.5.2")).pick(&releases), Some(v("4.5.2")));
+        assert_eq!(Request::Exact(v("4.5.9")).pick(&releases), None);
+    }
+
+    fn platform(os_release: &str, arch: Arch) -> Platform {
+        Platform {
+            os: Os::Linux,
+            arch,
+            distro: Some(LinuxDistro::parse_os_release(os_release)),
+        }
+    }
+
+    #[test]
+    fn chooses_builds() {
+        let noble = platform("ID=ubuntu\nVERSION_ID=\"24.04\"\n", Arch::X86_64);
+        let urls: Vec<String> = builds(&noble, Some((2, 39)), &v("4.6.1"))
+            .unwrap()
+            .into_iter()
+            .map(|b| b.url)
+            .collect();
+        assert_eq!(
+            urls,
+            [
+                "https://cdn.posit.co/r/manylinux_2_34/R-4.6.1-manylinux_2_34.tar.gz",
+                "https://cdn.posit.co/r/ubuntu-2404/R-4.6.1-ubuntu-2404.tar.gz"
+            ]
+        );
+        // Old glibc: only the distribution's build.
+        let focal = platform("ID=ubuntu\nVERSION_ID=\"20.04\"\n", Arch::Aarch64);
+        let b = builds(&focal, Some((2, 31)), &v("4.4.2")).unwrap();
+        assert_eq!(b.len(), 1);
+        assert_eq!(
+            b[0].url,
+            "https://cdn.posit.co/r/ubuntu-2004/R-4.4.2-ubuntu-2004-arm64.tar.gz"
+        );
+        let mint = platform(
+            "ID=linuxmint\nVERSION_ID=\"22\"\nUBUNTU_CODENAME=noble\n",
+            Arch::X86_64,
+        );
+        assert_eq!(
+            distribution_name(mint.distro.as_ref().unwrap()).as_deref(),
+            Some("ubuntu-2404")
+        );
+        assert_eq!(parse_glibc("glibc 2.39\n"), Some((2, 39)));
+        assert_eq!(parse_glibc("musl"), None);
+    }
+
+    #[test]
+    fn shows_system_install_commands() {
+        let noble = platform(
+            "ID=ubuntu\nID_LIKE=debian\nVERSION_ID=\"24.04\"\n",
+            Arch::X86_64,
+        );
+        assert_eq!(
+            system_install_commands(&noble, &v("4.6.1")).unwrap(),
+            [
+                "curl -fLO https://cdn.posit.co/r/ubuntu-2404/pkgs/r-4.6.1_1_amd64.deb",
+                "sudo apt-get install -y ./r-4.6.1_1_amd64.deb"
+            ]
+        );
+        let rhel = platform(
+            "ID=rocky\nID_LIKE=\"rhel centos fedora\"\nVERSION_ID=\"9.4\"\n",
+            Arch::X86_64,
+        );
+        assert_eq!(
+            system_install_commands(&rhel, &v("4.6.1")).unwrap(),
+            ["sudo dnf install -y https://cdn.posit.co/r/rhel-9/pkgs/R-4.6.1-1-1.x86_64.rpm"]
+        );
+    }
+
+    /// The fallback for old glibc, tried for real: the distribution build, relocated.
+    #[test]
+    #[ignore = "downloads R (about 65 MB)"]
+    fn installs_a_relocated_distribution_build() {
+        let platform = Platform::detect();
+        let Some(name) = platform.distro.as_ref().and_then(distribution_name) else {
+            return;
+        };
+        let t = tempfile::tempdir().unwrap();
+        let dirs = UserDirs {
+            data: t.path().join("data"),
+            cache: t.path().join("cache"),
+        };
+        let version = v("4.4.2");
+        let build = builds(&platform, None, &version).unwrap().remove(0);
+        assert_eq!(build.kind, BuildKind::Distribution(name));
+        let installed =
+            install_build(&Http::new(), &dirs, &build, &version, &|m| eprintln!("{m}")).unwrap();
+        let rscript = installed.installation.rscript();
+        let out = Command::new(&rscript)
+            .args(["-e", "cat(R.home(), R.version.string, sep = '\\n')"])
+            .output()
+            .unwrap();
+        let text = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(text.contains("R version 4.4.2"), "{text}");
+        assert!(
+            text.starts_with(&*installed.installation.r_home.to_string_lossy()),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn relocates_a_distribution_build() {
+        let t = tempfile::tempdir().unwrap();
+        let dir = t.path().join("4.4.2");
+        for f in PREFIX_FILES {
+            let p = dir.join(f);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(&p, "R_HOME_DIR=/opt/R/4.4.2/lib/R\n").unwrap();
+        }
+        std::fs::write(dir.join("lib/R/bin/Rscript"), b"\x7fELF").unwrap();
+        std::fs::write(dir.join("bin/Rscript"), b"\x7fELF").unwrap();
+        let to = Path::new("/home/me/.local/share/R/rok/r/4.4.2");
+        relocate(&dir, "/opt/R/4.4.2", to).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dir.join("bin/R")).unwrap(),
+            "R_HOME_DIR=/home/me/.local/share/R/rok/r/4.4.2/lib/R\n"
+        );
+        let wrapper = std::fs::read_to_string(dir.join("bin/Rscript")).unwrap();
+        assert!(wrapper.contains(
+            "RHOME=\"/home/me/.local/share/R/rok/r/4.4.2/lib/R\" exec \"/home/me/.local/share/R/rok/r/4.4.2/lib/R/bin/Rscript.orig\""
+        ));
+        assert_eq!(
+            std::fs::read(dir.join("lib/R/bin/Rscript.orig")).unwrap(),
+            b"\x7fELF"
+        );
+    }
+}

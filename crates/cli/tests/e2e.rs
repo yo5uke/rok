@@ -143,3 +143,35 @@ fn github_and_repository_packages() {
     let removed = json(&rok(&proj, &["remove", "gaborcsardi/praise", "--json"]));
     assert_eq!(removed["changes"][0]["name"], "praise");
 }
+
+#[test]
+#[ignore = "needs the network and R"]
+fn runs_scripts_with_the_project_library() {
+    let t = tempfile::tempdir().unwrap();
+    let home = t.path();
+    json(&rok(home, &["init", "proj", "--json"]));
+    let proj = home.join("proj");
+    json(&rok(&proj, &["add", "R6", "--json"]));
+    std::fs::write(
+        proj.join("s.R"),
+        "library(R6)\ncat(.libPaths()[1], commandArgs(TRUE), sep = '\\n')\nquit(status = 3)\n",
+    )
+    .unwrap();
+
+    // The script sees the project library first, gets its arguments, and its exit status
+    // becomes rok's.
+    let out = rok(&proj, &["run", "s.R", "--flag", "x"]);
+    assert_eq!(
+        out.status.code(),
+        Some(3),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("/.rok/library/R-"), "{stdout}");
+    assert!(stdout.contains("--flag\nx"), "{stdout}");
+
+    let list = json(&rok(&proj, &["r", "list", "--json"]));
+    assert!(!list["installed"].as_array().unwrap().is_empty());
+    assert!(!list["available"].as_array().unwrap().is_empty());
+}

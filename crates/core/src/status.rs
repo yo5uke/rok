@@ -15,6 +15,7 @@ use crate::lockfile::{Lockfile, Source, name_order};
 use crate::manifest::Manifest;
 use crate::ops::{self, manifest_copy};
 use crate::rdetect::RInstallation;
+use crate::syslibs::AptAdvice;
 use crate::version::Version;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -112,6 +113,21 @@ pub struct Inputs<'a> {
     pub r: Option<&'a RInstallation>,
     /// The project library's entries.
     pub library: &'a BTreeMap<String, Installed>,
+    /// Missing system libraries (Linux), if checked.
+    pub system: Option<&'a SystemCheck>,
+}
+
+/// Missing shared libraries on Linux (requirements, chapters 6 and 7).
+#[derive(Debug, Clone, Default)]
+pub struct SystemCheck {
+    /// Libraries R itself needs.
+    pub r_missing: Vec<String>,
+    /// Libraries the library's packages need, by package.
+    pub packages: BTreeMap<String, Vec<String>>,
+    /// How to install the packages' libraries.
+    pub advice: AptAdvice,
+    /// How to install R's libraries.
+    pub r_advice: AptAdvice,
 }
 
 /// Finds problems, sorted from the most to the least serious.
@@ -121,6 +137,7 @@ pub fn check(inputs: &Inputs) -> Vec<Problem> {
         lock,
         r,
         library,
+        system,
     } = *inputs;
     let mut problems = Vec::new();
     let (minor, _) = ops::manifest_r(manifest);
@@ -133,8 +150,29 @@ pub fn check(inputs: &Inputs) -> Vec<Problem> {
             message: format!("This project needs R {minor}, which is not installed."),
             details: Vec::new(),
             fix: Some(format!(
-                "Install R {minor}, or change the project's R version in rok.toml."
+                "Run `rok r install` to install R {minor}, or `rok r pin` to move the project to an installed R."
             )),
+        });
+    }
+    if let (Some(sys), Some(r)) = (system, r)
+        && !sys.r_missing.is_empty()
+    {
+        let n = sys.r_missing.len();
+        problems.push(Problem {
+            level: Level::Error,
+            code: "r-libraries",
+            message: format!(
+                "R {} cannot start: {n} shared librar{} it needs {} missing.",
+                r.version,
+                if n == 1 { "y" } else { "ies" },
+                if n == 1 { "is" } else { "are" }
+            ),
+            details: sys.r_missing.clone(),
+            fix: Some(match sys.r_advice.command() {
+                Some(cmd) if sys.r_advice.unknown.is_empty() => format!("Run `{cmd}`."),
+                _ => "Install the system packages that provide them (`apt-file search <library>` finds them)."
+                    .to_string(),
+            }),
         });
     }
 
@@ -204,6 +242,49 @@ pub fn check(inputs: &Inputs) -> Vec<Problem> {
         }
     }
 
+    // 4. System libraries.
+    if let Some(sys) = system
+        && !sys.packages.is_empty()
+    {
+        let n = sys.packages.len();
+        let mut details: Vec<String> = sys
+            .packages
+            .iter()
+            .map(|(name, libs)| format!("{name}: {}", libs.join(", ")))
+            .collect();
+        if !sys.advice.unknown.is_empty() {
+            details.push(format!(
+                "No system package was found for: {}",
+                sys.advice.unknown.join(", ")
+            ));
+        }
+        let fix = sys.advice.command().map(|c| {
+            if sys.advice.broad {
+                format!(
+                    "Run `{c}`. These are the development packages P3M lists, which include more than is needed{}.",
+                    if sys.advice.needs_update {
+                        " (apt's package lists are missing, so the exact ones cannot be found)"
+                    } else {
+                        ""
+                    }
+                )
+            } else {
+                format!("Run `{c}`.")
+            }
+        });
+        problems.push(Problem {
+            level: Level::Warning,
+            code: "system-libraries",
+            message: format!(
+                "{n} package{} need{} system libraries that are not installed.",
+                ops::plural(n),
+                if n == 1 { "s" } else { "" }
+            ),
+            details,
+            fix,
+        });
+    }
+
     // 6. Information.
     if let (Some(l), Some(r)) = (lock, r)
         && l.r.minor() == r.version.minor()
@@ -216,6 +297,23 @@ pub fn check(inputs: &Inputs) -> Vec<Problem> {
             details: Vec::new(),
             fix: None,
         });
+    }
+    if let Some(l) = lock {
+        let rebuilt = ops::rebuilt_packages(l);
+        if !rebuilt.is_empty() {
+            problems.push(Problem {
+                level: Level::Info,
+                code: "rebuilt-from-git",
+                message: format!(
+                    "{} package{} {} rebuilt from Git because the repository no longer has the release; the result may differ from it.",
+                    rebuilt.len(),
+                    ops::plural(rebuilt.len()),
+                    if rebuilt.len() == 1 { "was" } else { "were" }
+                ),
+                details: rebuilt,
+                fix: None,
+            });
+        }
     }
     if let Some(l) = lock {
         let mixed: Vec<String> = l
@@ -433,6 +531,7 @@ mod tests {
             lock: Some(&l),
             r: Some(&r),
             library: &lib,
+            system: None,
         });
         assert_eq!(codes(&problems), ["mixed-dates"]);
         assert_eq!(problems[0].details, ["fixest 0.12.1 (2024-06-14)"]);
@@ -463,6 +562,7 @@ mod tests {
                 lock: Some(&l),
                 r: Some(&r),
                 library: lib,
+                system: None,
             })
         };
         assert!(run(&linked("4.6-x-source-gh-aaaaaaaaaaaa"), &m).is_empty());
@@ -478,6 +578,55 @@ mod tests {
         assert_eq!(
             changed[0].details,
             ["praise: the source changed to `github:o/praise#tag=v1`"]
+        );
+    }
+
+    #[test]
+    fn reports_missing_system_libraries() {
+        let lib = BTreeMap::from([
+            (
+                "fixest".to_string(),
+                Installed::Linked {
+                    version: Some("0.12.1".parse().unwrap()),
+                    key: "k".into(),
+                },
+            ),
+            (
+                "Rcpp".to_string(),
+                Installed::Linked {
+                    version: Some("1.1.2".parse().unwrap()),
+                    key: "k".into(),
+                },
+            ),
+        ]);
+        let sys = SystemCheck {
+            r_missing: vec!["libblas.so.3".into()],
+            packages: BTreeMap::from([(
+                "sf".to_string(),
+                vec!["libgdal.so.34".into(), "libproj.so.25".into()],
+            )]),
+            advice: AptAdvice {
+                packages: vec!["libgdal34t64".into(), "libproj25".into()],
+                ..Default::default()
+            },
+            r_advice: AptAdvice::default(),
+        };
+        let (m, l, r) = (manifest("fixest = \"*\""), lock(), r("4.6.1"));
+        let problems = check(&Inputs {
+            manifest: &m,
+            lock: Some(&l),
+            r: Some(&r),
+            library: &lib,
+            system: Some(&sys),
+        });
+        assert_eq!(
+            codes(&problems),
+            ["r-libraries", "system-libraries", "mixed-dates"]
+        );
+        assert_eq!(problems[1].details, ["sf: libgdal.so.34, libproj.so.25"]);
+        assert_eq!(
+            problems[1].fix.as_deref(),
+            Some("Run `sudo apt-get install -y libgdal34t64 libproj25`.")
         );
     }
 
@@ -512,6 +661,7 @@ mod tests {
             lock: Some(&l),
             r: None,
             library: &lib,
+            system: None,
         });
         assert_eq!(
             codes(&problems),
@@ -546,6 +696,7 @@ mod tests {
             lock: Some(&l),
             r: Some(&r),
             library: &lib,
+            system: None,
         });
         assert!(problems.iter().any(
             |p| p.code == "r-patch" && p.message == "Using R 4.6.0; rok.lock records R 4.6.1."

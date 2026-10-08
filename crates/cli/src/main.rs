@@ -1,6 +1,7 @@
 //! Command-line entry point of rok.
 
 mod commands;
+mod rcmd;
 mod ui;
 
 use std::path::PathBuf;
@@ -75,8 +76,27 @@ enum Command {
         #[arg(long)]
         dry_run: bool,
     },
-    /// Undo the last add, remove or update.
+    /// Undo the last add, remove, update or `r pin`.
     Undo,
+    /// Run an R script with the project's R and library (after syncing them).
+    Run {
+        /// The R version to use instead of the project's, such as 4.5 or 4.5.1.
+        #[arg(long, value_name = "VERSION")]
+        r: Option<String>,
+        /// The script, then arguments passed to it.
+        #[arg(
+            required = true,
+            trailing_var_arg = true,
+            allow_hyphen_values = true,
+            value_name = "FILE"
+        )]
+        args: Vec<String>,
+    },
+    /// Manage R itself: list, install, uninstall, and the project's R version.
+    R {
+        #[command(subcommand)]
+        command: RCommand,
+    },
     /// Show what is out of sync, without using the network.
     Status {
         /// List every package.
@@ -102,6 +122,40 @@ enum Command {
     },
 }
 
+#[derive(Subcommand)]
+enum RCommand {
+    /// List installed R versions and the ones available to install.
+    List {
+        /// List every available version, not only the newest patch of each minor version.
+        #[arg(long)]
+        all: bool,
+    },
+    /// Install R without administrator rights (default: the version the project needs, or the
+    /// newest release outside a project).
+    Install {
+        /// A version such as 4.6, 4.6.1 or latest.
+        #[arg(value_name = "VERSION")]
+        version: Option<String>,
+        /// Show the commands that install R for all users in /opt/R instead (they need sudo).
+        #[arg(long)]
+        system: bool,
+    },
+    /// Remove an R version that rok installed.
+    Uninstall {
+        #[arg(value_name = "VERSION")]
+        version: String,
+    },
+    /// Move the project to another R version (resolving its packages again).
+    Pin {
+        /// A version such as 4.6, 4.6.1 or latest.
+        #[arg(value_name = "VERSION")]
+        version: String,
+        /// What to do with packages that have no binary for the new R (asked if not given).
+        #[arg(long, value_enum)]
+        strategy: Option<rcmd::Strategy>,
+    },
+}
+
 fn main() -> ExitCode {
     let cli = Cli::parse();
     let ui = ui::Ui::new(cli.yes, cli.json);
@@ -121,6 +175,16 @@ fn main() -> ExitCode {
             dry_run,
         } => commands::update(&ui, project, &packages, to, dry_run),
         Command::Undo => commands::undo(&ui, project),
+        Command::Run { r, args } => match rcmd::run(&ui, project, r, &args) {
+            Ok(code) => return code,
+            Err(e) => Err(e),
+        },
+        Command::R { command } => match command {
+            RCommand::List { all } => rcmd::list(&ui, project, all),
+            RCommand::Install { version, system } => rcmd::install(&ui, project, version, system),
+            RCommand::Uninstall { version } => rcmd::uninstall(&ui, &version),
+            RCommand::Pin { version, strategy } => rcmd::pin(&ui, project, &version, strategy),
+        },
         Command::Status { packages, check } => match commands::status(&ui, project, packages) {
             Ok(true) if check => return ExitCode::FAILURE,
             other => other.map(|_| ()),

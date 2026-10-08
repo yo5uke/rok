@@ -449,6 +449,7 @@ dependencies = [
  "anyhow",
  "clap",
  "rok-core",
+ "rok-rinstall",
  "serde_json",
  "tempfile",
 ]
@@ -473,6 +474,15 @@ dependencies = [
 [[package]]
 name = "rok-rinstall"
 version = "0.1.0"
+dependencies = [
+ "flate2",
+ "rok-core",
+ "serde",
+ "serde_json",
+ "tar",
+ "tempfile",
+ "thiserror",
+]
 
 [[package]]
 name = "rustc-hash"

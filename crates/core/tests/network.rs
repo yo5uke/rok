@@ -148,3 +148,62 @@ fn resolves_the_benchmark_projects() {
         assert!(result.iter().any(|r| r.name == roots[0]));
     }
 }
+
+#[test]
+#[ignore = "inspects this machine"]
+fn agrees_with_ldd_on_missing_libraries() {
+    use rok_core::syslibs::{SystemLibraries, package_objects, r_objects};
+    use std::path::PathBuf;
+
+    let Some(libs) = SystemLibraries::detect(Platform::detect().arch) else {
+        return;
+    };
+    let r_home = PathBuf::from("/usr/lib/R");
+    if r_home.is_dir() {
+        let missing = libs.missing(&r_objects(&r_home), &[r_home.join("lib")]);
+        eprintln!("R at {}: missing {missing:?}", r_home.display());
+    }
+    // Every package in ROK_CACHE_DIR, compared with ldd's "not found" (direct dependencies).
+    let Some(cache) = std::env::var_os("ROK_CACHE_DIR") else {
+        return;
+    };
+    let mut checked = 0;
+    for name in std::fs::read_dir(PathBuf::from(cache).join("packages"))
+        .into_iter()
+        .flatten()
+        .flatten()
+    {
+        for version in std::fs::read_dir(name.path())
+            .into_iter()
+            .flatten()
+            .flatten()
+        {
+            for key in std::fs::read_dir(version.path())
+                .into_iter()
+                .flatten()
+                .flatten()
+            {
+                let dir = key.path().join(name.file_name());
+                for so in package_objects(&dir) {
+                    let ours = libs.missing(std::slice::from_ref(&so), &[r_home.join("lib")]);
+                    let ldd = std::process::Command::new("ldd").arg(&so).output().unwrap();
+                    let ldd: Vec<String> = String::from_utf8_lossy(&ldd.stdout)
+                        .lines()
+                        .filter(|l| l.contains("not found"))
+                        .filter_map(|l| l.split_whitespace().next().map(str::to_string))
+                        .filter(|l| !l.starts_with("libR.so"))
+                        .collect();
+                    for m in &ours {
+                        assert!(
+                            ldd.contains(m),
+                            "{}: rok says {m} is missing, ldd does not",
+                            so.display()
+                        );
+                    }
+                    checked += 1;
+                }
+            }
+        }
+    }
+    eprintln!("checked {checked} shared objects");
+}

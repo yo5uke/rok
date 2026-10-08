@@ -9,19 +9,18 @@ use crate::dcf::Dependency;
 use crate::github::{GitHub, GitHubError};
 use crate::http::Http;
 use crate::install::{self, Built, Context, InstallError, LinkReport, Plan, Wanted};
-use crate::lockfile::{
-    LockedPackage, Lockfile, ManifestCopy, Remote, Snapshot, Source, name_order,
-};
+use crate::lockfile::{LockedPackage, Lockfile, ManifestCopy, Snapshot, Source, name_order};
 use crate::manifest::{DependencySource, DependencySpec, GitRef, Manifest};
 use crate::p3m::{self, Index, IndexEntry, P3m, P3mError};
 use crate::par;
 use crate::paths::{PathsError, UserDirs};
-use crate::platform::Platform;
+use crate::platform::{Os, Platform};
 use crate::rdetect::{self, RInstallation};
 use crate::repo::{self, RepoError, Repositories};
 use crate::resolve::{
     self, Candidate, Origin, Request, ResolveError, Resolved, SnapshotSource, SourceError,
 };
+use crate::syslibs::{self, AptAdvice, SystemLibraries};
 use crate::version::Version;
 
 #[derive(Debug, thiserror::Error)]
@@ -224,6 +223,9 @@ pub struct Keep {
     /// Packages to take from the `newer` snapshot, while the other packages new to the
     /// lockfile still come from the project's snapshot when they can (`rok add --latest`).
     pub latest: HashSet<String>,
+    /// Versions to prefer, with the snapshot date to take each from (`rok r pin`: packages
+    /// moved to a version that has a binary for the new R).
+    pub pinned: BTreeMap<String, (Version, String)>,
 }
 
 /// Resolves the manifest into a lockfile. Versions in `old` are kept when allowed; their
@@ -356,6 +358,10 @@ pub fn resolve_lock_with(
             locked.insert(p.name.clone(), (p.version.clone(), d.clone()));
         }
     }
+    for (name, (version, d)) in &keep.pinned {
+        preferred.insert(name.clone(), version.clone());
+        locked.insert(name.clone(), (version.clone(), d.clone()));
+    }
     let mut prefer_date = None;
     if let Some(newer) = &keep.newer
         && !keep.latest.is_empty()
@@ -466,7 +472,25 @@ pub fn resolve_lock_with(
                 .dependency(&r.name)
                 .map(|d| d.env.clone())
                 .unwrap_or_default(),
+            sysreqs: prev.map(|p| p.sysreqs.clone()).unwrap_or_default(),
         });
+    }
+    // System requirements for this distribution, from P3M (CRAN packages only). Those of
+    // other distributions, recorded by collaborators, are kept; offline, the old ones stay.
+    if let Some((key, distribution, release)) = env.platform.sysreqs_distro() {
+        let names: Vec<&str> = packages
+            .iter()
+            .filter(|p| p.source.snapshot().is_some())
+            .map(|p| p.name.as_str())
+            .collect();
+        if let Ok(found) = env.p3m.sysreqs(&names, distribution, &release) {
+            for p in &mut packages {
+                match found.get(&p.name).filter(|_| p.source.snapshot().is_some()) {
+                    Some(reqs) => p.sysreqs.insert(key.clone(), reqs.clone()),
+                    None => p.sysreqs.remove(&key),
+                };
+            }
+        }
     }
     Ok(Lockfile {
         generated_by: format!("rok {}", env!("CARGO_PKG_VERSION")),
@@ -624,7 +648,16 @@ impl SyncPlan {
     pub fn sources(&self) -> Vec<&Wanted> {
         self.items
             .iter()
-            .filter(|(_, p)| *p == Plan::Source)
+            .filter(|(_, p)| matches!(p, Plan::Source { .. }))
+            .map(|(w, _)| w)
+            .collect()
+    }
+
+    /// Packages rebuilt from their Git origin because the repository no longer has them.
+    pub fn rebuilds(&self) -> Vec<&Wanted> {
+        self.items
+            .iter()
+            .filter(|(_, p)| *p == Plan::Source { git: true })
             .map(|(w, _)| w)
             .collect()
     }
@@ -691,6 +724,10 @@ pub fn plan_sync(
                 dependencies: p.dependencies.clone(),
                 sha256: p.sha256.clone(),
                 env: p.env.clone(),
+                remote: match &p.source {
+                    Source::Repository { remote, .. } => remote.clone(),
+                    Source::GitHub { .. } => None,
+                },
             })
         })
         .collect::<Result<Vec<Wanted>, OpError>>()?;
@@ -729,7 +766,7 @@ pub fn execute_sync(
             Plan::Binary { url, key, sha256 } => {
                 binaries.push((w, url.as_str(), key.as_str(), sha256.as_deref()))
             }
-            Plan::Source => {}
+            Plan::Source { .. } => {}
         }
     }
     if !binaries.is_empty() {
@@ -776,9 +813,9 @@ pub fn record_built_checksums(lock: &mut Lockfile, built: &[Built]) -> bool {
     changed
 }
 
-/// Records `RemoteUrl` and `RemoteSha` of packages from repositories other than CRAN, read from
-/// their DESCRIPTION, so a release the repository drops can be rebuilt from Git (requirements,
-/// chapter 7). Returns whether the lockfile changed.
+/// Records `RemoteUrl`, `RemoteSha` and `RemoteSubdir` of packages from repositories other
+/// than CRAN, read from their DESCRIPTION, so a release the repository drops can be rebuilt
+/// from Git (requirements, chapter 7). Returns whether the lockfile changed.
 pub fn record_remotes(lock: &mut Lockfile, paths: &[(String, PathBuf)]) -> bool {
     let mut changed = false;
     for (name, path) in paths {
@@ -787,16 +824,133 @@ pub fn record_remotes(lock: &mut Lockfile, paths: &[(String, PathBuf)]) -> bool 
                 repository, remote, ..
             } = &mut p.source
             && repository != "cran"
-            && let Some((url, sha)) = repo::remote_of(path)
+            && let Some(mut found) = repo::remote_of(path)
         {
-            let found = Some(Remote { url, sha });
-            if *remote != found {
-                *remote = found;
+            found.rebuilt = remote.as_ref().is_some_and(|r| r.rebuilt);
+            if remote.as_ref() != Some(&found) {
+                *remote = Some(found);
                 changed = true;
             }
         }
     }
     changed
+}
+
+/// Marks packages that were rebuilt from their Git origin, so the lockfile tells everyone and
+/// later syncs go straight to Git. Returns whether the lockfile changed.
+pub fn record_rebuilt(lock: &mut Lockfile, built: &[Built]) -> bool {
+    let mut changed = false;
+    for b in built.iter().filter(|b| b.git) {
+        if let Some(p) = lock.packages.iter_mut().find(|p| p.name == b.name)
+            && let Source::Repository {
+                remote: Some(r), ..
+            } = &mut p.source
+            && !r.rebuilt
+        {
+            r.rebuilt = true;
+            changed = true;
+        }
+    }
+    changed
+}
+
+/// Packages of the lockfile that were rebuilt from Git, for messages:
+/// `name version (url@sha)`.
+pub fn rebuilt_packages(lock: &Lockfile) -> Vec<String> {
+    lock.packages
+        .iter()
+        .filter_map(|p| match &p.source {
+            Source::Repository {
+                remote: Some(r), ..
+            } if r.rebuilt => Some(format!(
+                "{} {} ({}@{})",
+                p.name,
+                p.version,
+                r.url,
+                &r.sha[..r.sha.len().min(7)]
+            )),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Shared libraries that packages of a library need but the system lacks (Linux), by package.
+/// `paths` are the packages' directories. Empty where this cannot be checked.
+pub fn missing_libraries(
+    platform: &Platform,
+    paths: &[(String, PathBuf)],
+    r: &RInstallation,
+) -> BTreeMap<String, Vec<String>> {
+    if platform.os != Os::Linux {
+        return BTreeMap::new();
+    }
+    let Some(libs) = SystemLibraries::detect(platform.arch) else {
+        return BTreeMap::new();
+    };
+    let extra = [r.r_home.join("lib")];
+    paths
+        .iter()
+        .filter_map(|(name, path)| {
+            let missing = libs.missing(&syslibs::package_objects(path), &extra);
+            (!missing.is_empty()).then(|| (name.clone(), missing))
+        })
+        .collect()
+}
+
+/// Shared libraries that R itself needs but the system lacks (Linux).
+pub fn missing_r_libraries(platform: &Platform, r_home: &Path) -> Vec<String> {
+    if platform.os != Os::Linux {
+        return Vec::new();
+    }
+    SystemLibraries::detect(platform.arch)
+        .map(|libs| libs.missing(&syslibs::r_objects(r_home), &[r_home.join("lib")]))
+        .unwrap_or_default()
+}
+
+/// What to install for libraries R itself lacks (no system requirements are known for R, so
+/// only apt's package names and the known toolchain libraries help).
+pub fn r_library_advice(missing: &[String]) -> AptAdvice {
+    syslibs::apt_advice(
+        &BTreeMap::from([("R".to_string(), missing.to_vec())]),
+        &BTreeMap::new(),
+    )
+}
+
+/// What to install for missing libraries, from the lockfile's system requirements for this
+/// distribution. With `online`, requirements the lockfile lacks (it was resolved on another
+/// distribution) are looked up on P3M.
+pub fn library_advice(
+    env: &Env,
+    lock: &Lockfile,
+    missing: &BTreeMap<String, Vec<String>>,
+    online: bool,
+) -> AptAdvice {
+    let Some((key, distribution, release)) = env.platform.sysreqs_distro() else {
+        return AptAdvice {
+            unknown: missing.values().flatten().cloned().collect(),
+            ..Default::default()
+        };
+    };
+    let mut sysreqs: BTreeMap<String, Vec<String>> = missing
+        .keys()
+        .filter_map(|n| Some((n.clone(), lock.package(n)?.sysreqs.get(&key)?.clone())))
+        .collect();
+    let lacking: Vec<&str> = missing
+        .keys()
+        .filter(|n| !sysreqs.contains_key(*n))
+        .map(String::as_str)
+        .collect();
+    if online
+        && !lacking.is_empty()
+        && let Ok(found) = env.p3m.sysreqs(&lacking, distribution, &release)
+    {
+        for n in lacking {
+            if let Some(r) = found.get(n) {
+                sysreqs.insert(n.to_string(), r.clone());
+            }
+        }
+    }
+    syslibs::apt_advice(missing, &sysreqs)
 }
 
 pub fn plural(n: usize) -> &'static str {
@@ -806,6 +960,7 @@ pub fn plural(n: usize) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::lockfile::Remote;
     use crate::rdetect::RKind;
 
     fn r(v: &str, kind: RKind) -> RInstallation {
@@ -982,7 +1137,9 @@ mod tests {
             remote,
             &Some(Remote {
                 url: "https://github.com/o/a".into(),
-                sha: "abc".into()
+                sha: "abc".into(),
+                subdir: None,
+                rebuilt: false,
             })
         );
     }
