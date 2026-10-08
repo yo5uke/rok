@@ -97,7 +97,12 @@ impl Ui {
     }
 
     pub fn info(&self, msg: &str) {
-        self.line(&format!("{} {msg}", self.paint(CYAN, "ℹ")));
+        self.line(&self.info_line(msg));
+    }
+
+    /// The line `info` prints, for R to show later.
+    pub fn info_line(&self, msg: &str) -> String {
+        format!("{} {msg}", self.paint(CYAN, "ℹ"))
     }
 
     pub fn warn(&self, msg: &str) {

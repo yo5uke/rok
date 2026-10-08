@@ -96,6 +96,7 @@ local({
     if (nzchar(bin)) bin else NA_character_
   }
   bin <- find_binary()
+  hint <- character()
   if (is.na(bin) && interactive()) {
     # A collaborator without rok: offer to install it (one question), then sync.
     if (nzchar(system.file(package = "rok"))) {
@@ -131,6 +132,9 @@ local({
       # Strict mode in a non-interactive session: stop instead of running out of sync.
       if (status == 3L) quit(save = "no", status = 1L)
       if (length(value("library"))) lib <- value("library")[[1L]]
+      if (length(value("hint_add")) && length(value("hint_sync"))) {
+        hint <- c(add = value("hint_add")[[1L]], sync = value("hint_sync")[[1L]])
+      }
       break
     }
   }
@@ -139,6 +143,35 @@ local({
   own <- if (nzchar(data)) file.path(data, "library", paste0("R-", minor)) else character()
   own <- own[dir.exists(own)]
   assign(".lib.loc", unique(c(normalizePath(lib), own, .Library)), envir = environment(.libPaths))
+  # A "there is no package called" error that no code handles gets a line on what to do; those
+  # that tryCatch(), try() or requireNamespace() handle never reach this handler. R refuses to
+  # add it with handlers on the stack (an IDE running this file inside tryCatch()): then none.
+  on_stack <- function() {
+    for (i in seq_len(sys.nframe())) {
+      f <- sys.function(i)
+      if (identical(f, tryCatch) || identical(f, withCallingHandlers)) return(TRUE)
+    }
+    FALSE
+  }
+  if (length(hint) && exists("globalCallingHandlers", baseenv()) && !on_stack()) {
+    root <- getwd()
+    globalCallingHandlers(packageNotFoundError = function(cond) {
+      pkg <- cond$package
+      if (!is.character(pkg) || length(pkg) != 1L) return()
+      # In rok.lock (not synced) or not; packages rok does not manage get no line.
+      lock <- tryCatch(readLines(file.path(root, "rok.lock"), warn = FALSE), error = function(e) character())
+      at <- match(paste0("name = \"", pkg, "\""), lock)
+      kind <- "add"
+      if (!is.na(at)) {
+        rest <- lock[-seq_len(at)]
+        entry <- rest[seq_len(match("", c(rest, "")) - 1L)]
+        if (any(grepl("unmanaged = true", entry, fixed = TRUE))) return()
+        kind <- "sync"
+      }
+      cond$message <- paste0(conditionMessage(cond), "\n", gsub("{package}", pkg, hint[[kind]], fixed = TRUE))
+      stop(cond)
+    })
+  }
 })
 "#;
 

@@ -223,15 +223,48 @@ fn activates_projects_at_r_startup() {
         rok(&proj, &args)
     };
 
-    // In sync: one line for people, the library for R.
+    // In sync: one line for people, the library and the lines for missing packages for R.
     let out = activate(&["--interactive"]);
     assert!(out.status.success());
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.starts_with("library=") && stdout.contains("/.rok/library/R-"));
+    assert!(stdout.contains("\nhint_add=") && stdout.contains("\nhint_sync="));
     assert!(String::from_utf8_lossy(&out.stderr).contains("rok: proj (R "));
 
+    // In R, an error about a package nothing handles gets the line; a handled one does not.
+    let r = Command::new("R")
+        .args(["-q", "--no-save", "--interactive"])
+        .current_dir(&proj)
+        .env("ROK_BINARY", env!("CARGO_BIN_EXE_rok"))
+        .env("ROK_CACHE_DIR", home.join("cache"))
+        .env("ROK_DATA_DIR", home.join("data"))
+        .env("NO_COLOR", "1")
+        .stdin(
+            std::fs::File::open({
+                let script = home.join("missing.R");
+                std::fs::write(
+                    &script,
+                    "library(nopkg)\ntryCatch(library(nopkg2), error = function(e) NULL)\n",
+                )
+                .unwrap();
+                script
+            })
+            .unwrap(),
+        )
+        .output()
+        .unwrap();
+    let console = String::from_utf8_lossy(&r.stderr);
+    assert!(console.contains("run `rok::add(\"nopkg\")`."), "{console}");
+    assert!(!console.contains("nopkg2"), "{console}");
+
     // Out of sync in a non-interactive session: a warning, nothing synced (the default).
-    let lib = stdout.trim().strip_prefix("library=").unwrap().to_string();
+    let lib = stdout
+        .lines()
+        .next()
+        .unwrap()
+        .strip_prefix("library=")
+        .unwrap()
+        .to_string();
     std::fs::remove_file(std::path::Path::new(&lib).join("R6")).unwrap();
     let out = activate(&[]);
     assert!(out.status.success());

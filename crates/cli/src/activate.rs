@@ -3,9 +3,11 @@
 //! light, asks before a sync that builds from source, and tells R which library to use.
 //!
 //! activate.R works with base R alone, so the output on stdout is `key=value` lines: always
-//! `library=<path>`; for a question, exit status 2 with `choice=`, `question=` and one
-//! `option=<value>\t<label>` line per answer (activate.R asks and runs again with
-//! `--choice <value>`). Exit status 3 means strict mode: activate.R stops R.
+//! `library=<path>`; in an interactive session with the project library, `hint_add=` and
+//! `hint_sync=` (lines added to errors about missing packages); for a question, exit status 2
+//! with `choice=`, `question=` and one `option=<value>\t<label>` line per answer (activate.R
+//! asks and runs again with `--choice <value>`). Exit status 3 means strict mode: activate.R
+//! stops R.
 
 use std::path::Path;
 use std::process::ExitCode;
@@ -78,6 +80,18 @@ pub fn activate(
     }
     let library = project.library(&minor, &env.platform);
     println!("library={}", library.display());
+    if interactive {
+        // activate.R adds one of these to "there is no package called" errors (requirements
+        // chapter 7, Suggests): `{package}` is replaced with the package's name.
+        println!(
+            "hint_add={}",
+            ui.info_line("To add {package} to this project, run `rok::add(\"{package}\")`.")
+        );
+        println!(
+            "hint_sync={}",
+            ui.info_line("{package} is in rok.lock but not in the library; run `rok::sync()`.")
+        );
+    }
 
     let old_lock = project.read_lock()?;
     if let Some(l) = &old_lock
