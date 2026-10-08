@@ -4,19 +4,23 @@
 \alias{sync}
 \title{Make the library match the lockfile}
 \usage{
-sync(locked = FALSE)
+sync(locked = FALSE, project = ".")
 }
 \arguments{
-\item{locked}{Fail instead of updating `rok.lock` when it is out of date.}
+\item{locked}{Fail instead of updating \code{rok.lock} when it is out of date.}
+
+\item{project}{A directory of the project (default: the working directory).}
 }
 \value{
 The result, invisibly.
 }
 \description{
-Updates `rok.lock` first if `rok.toml` changed.
+Updates \code{rok.lock} first if \code{rok.toml} changed.
 }
 \examples{
-\dontrun{
-sync()
-}
+\dontshow{if (interactive() && rok_available()) withAutoprint(\{ # examplesIf}
+dir <- tempfile("my-analysis")
+init(dir)
+sync(project = dir)
+\dontshow{\}) # examplesIf}
 }

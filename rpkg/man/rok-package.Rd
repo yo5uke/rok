@@ -6,23 +6,28 @@
 \alias{rok-package}
 \title{rok: Fast Package and Project Manager for R}
 \description{
-rok manages the packages and the R version of a project. Packages are declared in
-`rok.toml`, resolved from dated snapshots of Posit Package Manager, and recorded in
-`rok.lock`. The work is done by the rok binary, which [setup()] installs; the functions of
-this package call it.
+Manages the packages and the R version of a project, in the spirit of 'uv' for 'Python'. Packages are resolved from dated snapshots of the 'Posit Package Manager' and recorded in a lockfile, so that a project can be reproduced as it was. The work is done by the 'rok' command-line program, which this package downloads on first use, after asking.
 }
 \details{
-Options:
-* `rok.binary`: the path of the rok binary to use.
-* `rok.yes`: answer yes to every question (for non-interactive sessions).
-* `rok.release_url`: where [setup()] downloads the binary from.
+rok manages the packages and the R version of a project. Packages are declared in
+\code{rok.toml}, resolved from dated snapshots of Posit Package Manager, and recorded in
+\code{rok.lock}. The work is done by the rok binary, which \code{\link[=setup]{setup()}} installs; the functions of
+this package call it.
 }
+\section{Package options}{
+\itemize{
+\item \code{rok.binary}: the path of the rok binary to use (see \code{\link[=rok_binary]{rok_binary()}}).
+\item \code{rok.yes}: answer yes to every question, for non-interactive sessions.
+\item \code{rok.release_url}: where \code{\link[=setup]{setup()}} downloads the binary from.
+}
+}
+
 \author{
-\strong{Maintainer}: Yosuke Abe \email{kumakorodadda@gmail.com} [copyright holder]
+\strong{Maintainer}: Yosuke Abe \email{yosuke.abe0507@gmail.com} [copyright holder]
 
 Authors:
 \itemize{
-  \item Yosuke Abe \email{kumakorodadda@gmail.com} [copyright holder]
+  \item Yosuke Abe \email{yosuke.abe0507@gmail.com} [copyright holder]
 }
 
 }

@@ -7,19 +7,20 @@
 install_r(version = NULL, system = FALSE)
 }
 \arguments{
-\item{version}{A version such as `"4.6"`, `"4.6.1"` or `"latest"`.}
+\item{version}{A version such as \code{"4.6"}, \code{"4.6.1"} or \code{"latest"}.}
 
-\item{system}{Only show the commands that install R for all users (they need `sudo`).}
+\item{system}{Only show the commands that install R for all users (they need \code{sudo}).}
 }
 \value{
 The result, invisibly.
 }
 \description{
-Installs R without administrator rights. Without `version`, installs the version the
-project needs (or, outside a project, the latest release).
+Installs R without administrator rights. Without \code{version}, installs the version the
+project in the working directory needs (or, outside a project, the latest release).
 }
 \examples{
-\dontrun{
-install_r("4.5")
-}
+\dontshow{if (interactive() && rok_available()) withAutoprint(\{ # examplesIf}
+# Show how to install the latest R for all users (nothing is installed)
+install_r("latest", system = TRUE)
+\dontshow{\}) # examplesIf}
 }

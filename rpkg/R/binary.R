@@ -24,12 +24,11 @@ the <- new.env(parent = emptyenv())
 #' `ROK_BINARY`, the place [setup()] puts it, and the `PATH`. The binary must have the same
 #' version as this package.
 #'
-#' @return The path of the binary.
+#' @returns The path of the binary. An error if no matching binary is found.
+#' @seealso [rok_available()] to check without an error.
 #' @export
-#' @examples
-#' \dontrun{
+#' @examplesIf rok_available()
 #' rok_binary()
-#' }
 rok_binary <- function() {
   if (!is.null(the$binary) && file.exists(the$binary)) {
     return(the$binary)
@@ -52,6 +51,19 @@ rok_binary <- function() {
   check_version(bin)
   the$binary <- bin
   bin
+}
+
+#' Whether the rok binary is ready
+#'
+#' Checks that a rok binary with the same version as this package can be found (see
+#' [rok_binary()]). If not, [setup()] installs one.
+#'
+#' @returns `TRUE` or `FALSE`.
+#' @export
+#' @examples
+#' rok_available()
+rok_available <- function() {
+  !inherits(tryCatch(rok_binary(), error = identity), "error")
 }
 
 # The version a binary reports (`rok 0.1.0`), or NA if it does not run.

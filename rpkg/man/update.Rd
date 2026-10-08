@@ -4,7 +4,7 @@
 \alias{update}
 \title{Update packages}
 \usage{
-update(..., to = NULL, dry_run = FALSE)
+update(..., to = NULL, dry_run = FALSE, project = ".")
 }
 \arguments{
 \item{...}{Packages to update (default: all).}
@@ -12,19 +12,33 @@ update(..., to = NULL, dry_run = FALSE)
 \item{to}{The snapshot date to move to.}
 
 \item{dry_run}{Show what would change without changing anything.}
+
+\item{project}{A directory of the project (default: the working directory).}
 }
 \value{
 The result (the changes), invisibly.
 }
 \description{
-Without packages, moves the project's snapshot date to the latest one (or `to`) and
+Without packages, moves the project's snapshot date to the latest one (or \code{to}) and
 resolves again. With packages, updates only those (and what they need) from the latest
 snapshot, keeping the project's date.
 }
-\examples{
-\dontrun{
-update()
-update("sf")
-update(dry_run = TRUE)
+\details{
+When rok is attached, this function masks \code{\link[stats:update]{stats::update()}}. Calls meant for it still
+reach it: if the first argument is not a character vector (a fitted model or a formula,
+as in \code{update(fit, . ~ . + x)}), the call goes to the \code{update()} that rok masks, as if rok
+were not attached.
 }
+\examples{
+\dontshow{if (interactive() && rok_available()) withAutoprint(\{ # examplesIf}
+dir <- tempfile("my-analysis")
+init(dir)
+add("R6", project = dir)
+update(dry_run = TRUE, project = dir)
+update("R6", project = dir)
+
+# Models are still updated by stats::update()
+fit <- lm(dist ~ speed, data = cars)
+update(fit, . ~ . + I(speed^2))
+\dontshow{\}) # examplesIf}
 }

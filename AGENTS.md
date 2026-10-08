@@ -19,7 +19,9 @@ rok は、Python の uv に着想を得た、R 向けの高速なパッケージ
 
 - Rust：`cargo fmt --check`、`cargo clippy --all-targets -- -D warnings`、`cargo test`
 - Rust（ネットワークと R を使うテスト。P3M や CLI に関わる変更のとき）：`cargo test -- --ignored`
-- R パッケージ：`R CMD build rpkg` の後、生成された tar.gz に `R CMD check --as-cran`
+- R パッケージ：`R CMD build rpkg` の後、生成された tar.gz に `R CMD check --as-cran`（LaTeX がない環境では `--no-manual` を付け、その旨を報告する）。`ROK_TEST_BINARY` に rok のバイナリを指定すると、バイナリを使うテストも走る
+- R パッケージ（`update()`・`remove()` に関わる変更のとき）：インストールした rok で `Rscript rpkg/dev/masking-matrix.R`
+- R パッケージの文書：roxygen2 の最新版で生成する（ユーザーのライブラリには入れず、rok のプロジェクトに入れて `rok run` で `roxygen2::roxygenise("rpkg")` を実行する）
 
 コマンドが増えたら、ここに追記する。
 

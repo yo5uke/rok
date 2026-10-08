@@ -4,25 +4,30 @@
 \alias{run}
 \title{Run a script with the project's R}
 \usage{
-run(file, args = character(), r = NULL)
+run(file, args = character(), r = NULL, project = ".")
 }
 \arguments{
 \item{file}{The script.}
 
 \item{args}{Arguments passed to the script.}
 
-\item{r}{The R version to use instead of the project's, such as `"4.5"`.}
+\item{r}{The R version to use instead of the project's, such as \code{"4.5"}.}
+
+\item{project}{A directory of the project (default: the working directory).}
 }
 \value{
 The exit status of the script, invisibly.
 }
 \description{
-Syncs the project, then runs `file` with `Rscript` in a separate process, using the
-project's R (or `r`) and library.
+Syncs the project, then runs \code{file} with \code{Rscript} in a separate process, using the
+project's R (or \code{r}) and library.
 }
 \examples{
-\dontrun{
-run("analysis.R")
-run("analysis.R", r = "4.5")
-}
+\dontshow{if (interactive() && rok_available()) withAutoprint(\{ # examplesIf}
+dir <- tempfile("my-analysis")
+init(dir)
+script <- file.path(dir, "hello.R")
+writeLines('cat("Hello from", R.version.string, "\\\\n")', script)
+run(script, project = dir)
+\dontshow{\}) # examplesIf}
 }

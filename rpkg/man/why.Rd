@@ -4,19 +4,24 @@
 \alias{why}
 \title{Why a package is installed}
 \usage{
-why(pkg)
+why(pkg, project = ".")
 }
 \arguments{
 \item{pkg}{A package name.}
+
+\item{project}{A directory of the project (default: the working directory).}
 }
 \value{
 The lines of the drawing, invisibly.
 }
 \description{
-Shows the packages that need `pkg`, up to the declared ones.
+Shows the packages that need \code{pkg}, up to the declared ones.
 }
 \examples{
-\dontrun{
-why("data.table")
-}
+\dontshow{if (interactive() && rok_available()) withAutoprint(\{ # examplesIf}
+dir <- tempfile("my-analysis")
+init(dir)
+add("jsonlite", project = dir)
+why("jsonlite", project = dir)
+\dontshow{\}) # examplesIf}
 }

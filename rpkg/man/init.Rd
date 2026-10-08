@@ -9,7 +9,7 @@ init(path = ".", r = NULL, name = NULL)
 \arguments{
 \item{path}{The project directory (created if needed).}
 
-\item{r}{The R version, such as `"4.6"` or `"latest"` (default: the running R).}
+\item{r}{The R version, such as \code{"4.6"} or \code{"latest"} (default: the running R).}
 
 \item{name}{The project name (default: the directory name).}
 }
@@ -17,13 +17,14 @@ init(path = ".", r = NULL, name = NULL)
 The result, invisibly.
 }
 \description{
-Creates `rok.toml`, `rok.lock` and the startup hook in `path`. The project uses the minor
+Creates \code{rok.toml}, \code{rok.lock} and the startup hook in \code{path}. The project uses the minor
 version of the R that is running, and the latest snapshot date that Posit Package Manager
-has published. If the rok binary is not installed yet, [setup()] installs it first.
+has published. If the rok binary is not installed yet, \code{\link[=setup]{setup()}} installs it first.
 }
 \examples{
-\dontrun{
-init()
-init("~/projects/my-analysis", r = "4.5")
-}
+\dontshow{if (interactive() && rok_available()) withAutoprint(\{ # examplesIf}
+dir <- tempfile("my-analysis")
+init(dir)
+list.files(dir, all.files = TRUE, no.. = TRUE)
+\dontshow{\}) # examplesIf}
 }

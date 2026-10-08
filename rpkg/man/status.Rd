@@ -4,22 +4,27 @@
 \alias{status}
 \title{Show the project's status}
 \usage{
-status(packages = FALSE)
+status(packages = FALSE, project = ".")
 }
 \arguments{
 \item{packages}{List every package.}
+
+\item{project}{A directory of the project (default: the working directory).}
 }
 \value{
-A list with the project, the problems (a data frame) and the packages (a data
-  frame), invisibly.
+A list, invisibly: \code{ok} (whether there is nothing to fix), \code{problems} (a data
+frame with one row per problem) and \code{packages} (a data frame with one row per package),
+among others.
 }
 \description{
-Shows what is out of sync between `rok.toml`, `rok.lock`, the library and R, without
+Shows what is out of sync between \code{rok.toml}, \code{rok.lock}, the library and R, without
 using the network, and returns the details invisibly.
 }
 \examples{
-\dontrun{
-s <- status()
+\dontshow{if (interactive() && rok_available()) withAutoprint(\{ # examplesIf}
+dir <- tempfile("my-analysis")
+init(dir)
+s <- status(project = dir)
 s$ok
-}
+\dontshow{\}) # examplesIf}
 }

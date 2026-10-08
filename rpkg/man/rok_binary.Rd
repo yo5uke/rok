@@ -7,15 +7,18 @@
 rok_binary()
 }
 \value{
-The path of the binary.
+The path of the binary. An error if no matching binary is found.
 }
 \description{
-Looks for the binary in this order: the option `rok.binary`, the environment variable
-`ROK_BINARY`, the place [setup()] puts it, and the `PATH`. The binary must have the same
+Looks for the binary in this order: the option \code{rok.binary}, the environment variable
+\code{ROK_BINARY}, the place \code{\link[=setup]{setup()}} puts it, and the \code{PATH}. The binary must have the same
 version as this package.
 }
 \examples{
-\dontrun{
+\dontshow{if (rok_available()) withAutoprint(\{ # examplesIf}
 rok_binary()
+\dontshow{\}) # examplesIf}
 }
+\seealso{
+\code{\link[=rok_available]{rok_available()}} to check without an error.
 }

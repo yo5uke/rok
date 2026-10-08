@@ -4,12 +4,14 @@
 \alias{tree}
 \title{Show the dependency tree}
 \usage{
-tree(pkg = NULL, depth = NULL)
+tree(pkg = NULL, depth = NULL, project = ".")
 }
 \arguments{
 \item{pkg}{Show only this package's dependencies (default: every declared package).}
 
 \item{depth}{How many levels to show.}
+
+\item{project}{A directory of the project (default: the working directory).}
 }
 \value{
 The lines of the drawing, invisibly.
@@ -18,8 +20,10 @@ The lines of the drawing, invisibly.
 Show the dependency tree
 }
 \examples{
-\dontrun{
-tree()
-tree("fixest", depth = 1)
-}
+\dontshow{if (interactive() && rok_available()) withAutoprint(\{ # examplesIf}
+dir <- tempfile("my-analysis")
+init(dir)
+add("R6", project = dir)
+tree(project = dir)
+\dontshow{\}) # examplesIf}
 }

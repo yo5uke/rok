@@ -4,27 +4,33 @@
 \alias{add}
 \title{Add packages}
 \usage{
-add(..., version = NULL, latest = FALSE)
+add(..., version = NULL, latest = FALSE, project = ".")
 }
 \arguments{
 \item{...}{Package names or GitHub repositories.}
 
-\item{version}{A version constraint for one package, such as `"< 0.13"`.}
+\item{version}{A version constraint for one package, such as \code{"< 0.13"}.}
 
 \item{latest}{Take the packages from the latest snapshot, keeping the project's snapshot.}
+
+\item{project}{A directory of the project (default: the working directory).}
 }
 \value{
 The result (the changes), invisibly.
 }
 \description{
-Declares packages in `rok.toml`, then updates `rok.lock` and the project library. Accepts
-the same forms as pak: `"fixest"` from CRAN, `"owner/repo"` and `"owner/repo@ref"` from
+Declares packages in \code{rok.toml}, then updates \code{rok.lock} and the project library. Accepts
+the same forms as pak: \code{"fixest"} from CRAN, \code{"owner/repo"} and \code{"owner/repo@ref"} from
 GitHub.
 }
 \examples{
-\dontrun{
-add("fixest", "sf")
-add("fixest", version = "< 0.13")
-add("yo5uke/coresynth@v0.3.0")
-}
+\dontshow{if (interactive() && rok_available()) withAutoprint(\{ # examplesIf}
+dir <- tempfile("my-analysis")
+init(dir)
+add("R6", project = dir)
+add("jsonlite", version = ">= 1.8", project = dir)
+
+# GitHub packages, optionally at a tag, branch or commit
+add("gaborcsardi/praise", project = dir)
+\dontshow{\}) # examplesIf}
 }

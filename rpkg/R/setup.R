@@ -47,13 +47,10 @@ consent <- function(question) {
 #' run it yourself to repair an installation or to install without the network.
 #'
 #' @param binary The path of a rok binary to install instead of downloading one.
-#' @return The paths of the binary and of the package library, invisibly.
+#' @returns A list with the paths of the binary and of the package library, invisibly.
 #' @export
-#' @examples
-#' \dontrun{
+#' @examplesIf interactive()
 #' setup()
-#' setup(binary = "~/Downloads/rok")
-#' }
 setup <- function(binary = NULL) {
   version <- as.character(utils::packageVersion("rok"))
   dest <- binary_path()

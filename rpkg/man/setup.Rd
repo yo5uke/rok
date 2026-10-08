@@ -10,17 +10,16 @@ setup(binary = NULL)
 \item{binary}{The path of a rok binary to install instead of downloading one.}
 }
 \value{
-The paths of the binary and of the package library, invisibly.
+A list with the paths of the binary and of the package library, invisibly.
 }
 \description{
-Downloads the rok binary that matches this package (or copies `binary`), and keeps a copy
+Downloads the rok binary that matches this package (or copies \code{binary}), and keeps a copy
 of this package where activated projects can load it. Everything goes under
-`tools::R_user_dir("rok", "data")`, after asking once. [init()] calls this when needed;
+\code{tools::R_user_dir("rok", "data")}, after asking once. \code{\link[=init]{init()}} calls this when needed;
 run it yourself to repair an installation or to install without the network.
 }
 \examples{
-\dontrun{
+\dontshow{if (interactive()) withAutoprint(\{ # examplesIf}
 setup()
-setup(binary = "~/Downloads/rok")
-}
+\dontshow{\}) # examplesIf}
 }

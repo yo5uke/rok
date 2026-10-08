@@ -1,7 +1,7 @@
 Package: rok
 Title: Fast Package and Project Manager for R
 Version: 0.1.0
-Authors@R: person("Yosuke", "Abe", email = "kumakorodadda@gmail.com",
+Authors@R: person("Yosuke", "Abe", email = "yosuke.abe0507@gmail.com",
     role = c("aut", "cre", "cph"))
 Description: Manages the packages and the R version of a project, in the
     spirit of 'uv' for 'Python'. Packages are resolved from dated snapshots
@@ -13,4 +13,5 @@ License: MIT + file LICENSE
 Encoding: UTF-8
 Depends: R (>= 4.0.0)
 Imports: tools, utils
-Config/roxygen2/version: 8.0.0
+Config/roxygen2/markdown: TRUE
+Config/roxygen2/version: 8.1.0

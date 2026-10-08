@@ -4,17 +4,23 @@
 \alias{undo}
 \title{Undo the last change}
 \usage{
-undo()
+undo(project = ".")
+}
+\arguments{
+\item{project}{A directory of the project (default: the working directory).}
 }
 \value{
 The result, invisibly.
 }
 \description{
-Restores `rok.toml` and `rok.lock` as they were before the last [add()], [remove()],
-[update()] or [pin_r()], and the library with them.
+Restores \code{rok.toml} and \code{rok.lock} as they were before the last \code{\link[=add]{add()}}, \code{\link[=remove]{remove()}},
+\code{\link[=update]{update()}} or \code{\link[=pin_r]{pin_r()}}, and the library with them.
 }
 \examples{
-\dontrun{
-undo()
-}
+\dontshow{if (interactive() && rok_available()) withAutoprint(\{ # examplesIf}
+dir <- tempfile("my-analysis")
+init(dir)
+add("R6", project = dir)
+undo(project = dir)
+\dontshow{\}) # examplesIf}
 }

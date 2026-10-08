@@ -4,23 +4,28 @@
 \alias{pin_r}
 \title{Change the project's R version}
 \usage{
-pin_r(version, strategy = NULL)
+pin_r(version, strategy = NULL, project = ".")
 }
 \arguments{
-\item{version}{A version such as `"4.6"`, `"4.6.1"` or `"latest"`.}
+\item{version}{A version such as \code{"4.6"}, \code{"4.6.1"} or \code{"latest"}.}
 
-\item{strategy}{What to do with packages without binaries: `"move"`, `"build"`, `"date"`
-or `"today"` (asked if not given).}
+\item{strategy}{What to do with packages without binaries: \code{"move"}, \code{"build"}, \code{"date"}
+or \code{"today"} (asked if not given).}
+
+\item{project}{A directory of the project (default: the working directory).}
 }
 \value{
 The result, invisibly.
 }
 \description{
 Moves the project to another minor version of R and resolves its packages again. If some
-packages have no binary for the new R, asks how to handle them.
+packages have no binary for the new R, asks how to handle them. If the new R is not
+installed, offers to install it.
 }
 \examples{
-\dontrun{
-pin_r("4.6")
-}
+\dontshow{if (interactive() && rok_available()) withAutoprint(\{ # examplesIf}
+dir <- tempfile("my-analysis")
+init(dir)
+pin_r("latest", project = dir)
+\dontshow{\}) # examplesIf}
 }

@@ -4,20 +4,31 @@
 \alias{remove}
 \title{Remove packages}
 \usage{
-remove(...)
+remove(..., project = ".")
 }
 \arguments{
-\item{...}{Package names (or `"owner/repo"` for GitHub packages).}
+\item{...}{Package names (or \code{"owner/repo"} for GitHub packages).}
+
+\item{project}{A directory of the project (default: the working directory).}
 }
 \value{
 The result (the changes), invisibly.
 }
 \description{
-Removes packages from `rok.toml`, then updates `rok.lock` and the project library. The
+Removes packages from \code{rok.toml}, then updates \code{rok.lock} and the project library. The
 packages stay in rok's cache.
 }
-\examples{
-\dontrun{
-remove("sf")
+\details{
+When rok is attached, this function masks \code{\link[base:remove]{base::remove()}}. Calls meant for it still reach
+it: if an argument is an unquoted name (\code{remove(x)}), or \code{list}, \code{pos}, \code{envir} or
+\code{inherits} is given, the call goes to the \code{remove()} that rok masks. To remove packages
+whose names are in a variable, call \code{rok::remove(pkgs)}.
 }
+\examples{
+\dontshow{if (interactive() && rok_available()) withAutoprint(\{ # examplesIf}
+dir <- tempfile("my-analysis")
+init(dir)
+add("R6", project = dir)
+remove("R6", project = dir)
+\dontshow{\}) # examplesIf}
 }
