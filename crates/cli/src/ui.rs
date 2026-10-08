@@ -13,6 +13,48 @@ pub struct Ui {
     pub yes: bool,
     /// Also print structured results as JSON on stdout (`--json`).
     pub json: bool,
+    /// Questions already answered yes, by id (`--confirmed`, used by the R package).
+    confirmed: Vec<String>,
+}
+
+/// A question that someone must answer, raised when rok runs for a program: with `--json` and
+/// no terminal, as the R package calls it. Nothing has been changed yet. The program asks the
+/// question, then runs rok again with `--confirmed <id>` (yes/no) or `<flag> <value>` (a choice).
+#[derive(Debug)]
+pub struct NeedsAnswer {
+    pub id: String,
+    pub question: String,
+    pub default: bool,
+    /// For a choice: (value, label) of each option, and the flag that passes the value.
+    pub options: Vec<(String, String)>,
+    pub flag: Option<String>,
+}
+
+impl std::fmt::Display for NeedsAnswer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} (needs an answer)", self.question)
+    }
+}
+
+impl std::error::Error for NeedsAnswer {}
+
+impl NeedsAnswer {
+    pub fn to_json(&self) -> serde_json::Value {
+        let mut needs = serde_json::json!({
+            "id": self.id,
+            "question": self.question,
+            "default": self.default,
+        });
+        if let Some(flag) = &self.flag {
+            needs["flag"] = flag.as_str().into();
+            needs["options"] = self
+                .options
+                .iter()
+                .map(|(value, label)| serde_json::json!({ "value": value, "label": label }))
+                .collect();
+        }
+        serde_json::json!({ "needs": needs })
+    }
 }
 
 const GREEN: &str = "32";
@@ -23,12 +65,13 @@ const CYAN: &str = "36";
 const BOLD_YELLOW: &str = "1;33";
 
 impl Ui {
-    pub fn new(yes: bool, json: bool) -> Ui {
+    pub fn new(yes: bool, json: bool, confirmed: Vec<String>) -> Ui {
         let no_color = std::env::var_os("NO_COLOR").is_some_and(|v| !v.is_empty());
         Ui {
             color: std::io::stderr().is_terminal() && !no_color,
             yes,
             json,
+            confirmed,
         }
     }
 
@@ -130,13 +173,25 @@ impl Ui {
         }
     }
 
-    /// Asks a yes/no question. With `--yes` the answer is yes; without a terminal there is no
-    /// one to ask, so it is an error that tells how to proceed.
-    pub fn confirm(&self, question: &str, default: bool) -> anyhow::Result<bool> {
-        if self.yes {
+    /// Asks a yes/no question, identified by `id`. With `--yes` (or `--confirmed <id>`) the
+    /// answer is yes. Without a terminal there is no one to ask: for a program (`--json`) the
+    /// question is returned as [`NeedsAnswer`], otherwise it is an error that tells how to
+    /// proceed.
+    pub fn confirm(&self, id: &str, question: &str, default: bool) -> anyhow::Result<bool> {
+        if self.yes || self.confirmed.iter().any(|c| c == id) {
             return Ok(true);
         }
         if !std::io::stdin().is_terminal() {
+            if self.json {
+                return Err(NeedsAnswer {
+                    id: id.to_string(),
+                    question: question.to_string(),
+                    default,
+                    options: Vec::new(),
+                    flag: None,
+                }
+                .into());
+            }
             anyhow::bail!(
                 "{question}\nThis needs confirmation; run again with `--yes` to proceed."
             );
@@ -157,23 +212,39 @@ impl Ui {
         })
     }
 
-    /// Prints a JSON result on stdout when `--json` was given.
-    /// Asks to pick one of `options` (numbered from 1; the first is the default). With `--yes`
-    /// the first is picked; without a terminal it is an error that says how to choose (`hint`).
-    pub fn choose(&self, question: &str, options: &[String], hint: &str) -> anyhow::Result<usize> {
+    /// Asks to pick one of `options` ((value, label), numbered from 1; the first is the
+    /// default). With `--yes` the first is picked. Without a terminal, a program (`--json`)
+    /// gets a [`NeedsAnswer`]; otherwise it is an error that says to pass `flag <value>`.
+    pub fn choose(
+        &self,
+        id: &str,
+        question: &str,
+        options: &[(String, String)],
+        flag: &str,
+    ) -> anyhow::Result<usize> {
         if self.yes {
             return Ok(0);
         }
         if !std::io::stdin().is_terminal() {
-            let mut msg = question.to_string();
-            for (i, o) in options.iter().enumerate() {
-                msg.push_str(&format!("\n  {}. {o}", i + 1));
+            if self.json {
+                return Err(NeedsAnswer {
+                    id: id.to_string(),
+                    question: question.to_string(),
+                    default: true,
+                    options: options.to_vec(),
+                    flag: Some(flag.to_string()),
+                }
+                .into());
             }
-            anyhow::bail!("{msg}\nThis needs a choice; {hint}.");
+            let mut msg = question.to_string();
+            for (i, (value, label)) in options.iter().enumerate() {
+                msg.push_str(&format!("\n  {}. {label} ({flag} {value})", i + 1));
+            }
+            anyhow::bail!("{msg}\nThis needs a choice; run again with one of the flags shown.");
         }
         self.line(&format!("{} {question}", self.paint(CYAN, "?")));
-        for (i, o) in options.iter().enumerate() {
-            self.line(&format!("  {}. {o}", i + 1));
+        for (i, (_, label)) in options.iter().enumerate() {
+            self.line(&format!("  {}. {label}", i + 1));
         }
         loop {
             let _ = write!(std::io::stderr(), "  Choose 1-{} [1]: ", options.len());
@@ -192,6 +263,7 @@ impl Ui {
         }
     }
 
+    /// Prints a JSON result on stdout when `--json` was given.
     pub fn result(&self, value: serde_json::Value) {
         if self.json {
             println!("{value}");

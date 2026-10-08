@@ -58,7 +58,7 @@ pub(crate) fn project_r(
             "This project needs R {minor}, which is not installed (found: {found})."
         ));
         let (version, why) = crate::rcmd::needed_version(ui, env, manifest, lock)?;
-        if !ui.confirm(&format!("Install R {version} ({why})?"), true)? {
+        if !ui.confirm("install-r", &format!("Install R {version} ({why})?"), true)? {
             bail!(
                 "Install R {minor} with `rok r install`, or move the project to an installed R with `rok r pin`."
             );
@@ -124,6 +124,7 @@ pub(crate) fn sync_library(
             ui.bullet("On Debian or Ubuntu: sudo apt-get install -y build-essential");
         }
         if !ui.confirm(
+            "build-from-source",
             &format!(
                 "Build {} package{} from source?",
                 sources.len(),
@@ -249,6 +250,7 @@ pub fn init(
         .as_deref()
         == Some(dir.as_path())
         && !ui.confirm(
+            "init-home",
             "This is your home directory. Create a rok project here?",
             false,
         )?
@@ -257,6 +259,7 @@ pub fn init(
     }
     if let Some(parent) = dir.parent().and_then(Project::find)
         && !ui.confirm(
+            "init-nested",
             &format!(
                 "{} is inside the rok project at {}. Create a nested project?",
                 dir.display(),
@@ -359,7 +362,7 @@ fn init_r(
         (_, Some(a)) => format!("the newest release matching `{a}`"),
         (_, None) => "the newest release".to_string(),
     };
-    if !ui.confirm(&format!("Install R {version} ({why})?"), true)? {
+    if !ui.confirm("install-r", &format!("Install R {version} ({why})?"), true)? {
         bail!("Cancelled. Nothing was changed.");
     }
     crate::rcmd::install_r(ui, env, &version, &why)
@@ -842,7 +845,11 @@ pub fn update(
         let downgrades = changes
             .iter()
             .any(|c| matches!((&c.from, &c.to), (Some(f), Some(t)) if t < f));
-        if !ui.confirm("Apply these changes?", !(moving_back || downgrades))? {
+        if !ui.confirm(
+            "apply-changes",
+            "Apply these changes?",
+            !(moving_back || downgrades),
+        )? {
             bail!("Cancelled. Nothing was changed.");
         }
     }

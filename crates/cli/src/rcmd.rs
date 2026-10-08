@@ -292,6 +292,7 @@ pub fn uninstall(ui: &Ui, version: &str) -> anyhow::Result<()> {
         }
     }
     if !ui.confirm(
+        "remove-r",
         &format!("Remove R {version} from {}?", home_relative(&dir)),
         true,
     )? {
@@ -386,7 +387,7 @@ pub fn pin(
                     keep.newer = Some(latest_date(&env)?);
                 }
                 Choice::Build => {}
-                Choice::Date(d) => {
+                Choice::Date(d) | Choice::Today(d) => {
                     keep.nothing = true;
                     new_date = Some(d);
                 }
@@ -422,6 +423,7 @@ pub fn pin(
         .iter()
         .any(|c| matches!((&c.from, &c.to), (Some(f), Some(t)) if t < f));
     if !ui.confirm(
+        "apply-changes",
         &format!("Move the project to R {declared}?"),
         !(moving_back || downgrades),
     )? {
@@ -432,6 +434,7 @@ pub fn pin(
     let r = match ops::select_r(&installs, &target.minor(), Some(&target)) {
         Some(r) => Some(r.clone()),
         None if ui.confirm(
+            "install-r",
             &format!("R {target} is not installed. Install it now?"),
             true,
         )? =>
@@ -480,6 +483,19 @@ enum Choice {
     Move(std::collections::BTreeMap<String, (Version, String)>),
     Build,
     Date(String),
+    Today(String),
+}
+
+impl Choice {
+    /// The `--strategy` value that picks this choice.
+    fn value(&self) -> &'static str {
+        match self {
+            Choice::Move(_) => "move",
+            Choice::Build => "build",
+            Choice::Date(_) => "date",
+            Choice::Today(_) => "today",
+        }
+    }
 }
 
 fn latest_date(env: &Env) -> anyhow::Result<String> {
@@ -595,7 +611,7 @@ fn choose_strategy(
     if wanted(Strategy::Today) && latest != manifest.project.snapshot {
         options.push((
             format!("Move the snapshot to the latest date ({latest})"),
-            Choice::Date(latest.clone()),
+            Choice::Today(latest.clone()),
         ));
     }
     ui.info(&format!(
@@ -606,14 +622,18 @@ fn choose_strategy(
     if options.is_empty() {
         bail!("The chosen strategy found no candidate; try another `--strategy`.");
     }
-    let texts: Vec<String> = options.iter().map(|(t, _)| t.clone()).collect();
+    let labelled: Vec<(String, String)> = options
+        .iter()
+        .map(|(t, c)| (c.value().to_string(), t.clone()))
+        .collect();
     let i = if options.len() == 1 && strategy.is_some() {
         0
     } else {
         ui.choose(
+            "strategy",
             "How should these packages be handled?",
-            &texts,
-            "run again with `--strategy move|build|date|today`",
+            &labelled,
+            "--strategy",
         )?
     };
     Ok(options.swap_remove(i).1)

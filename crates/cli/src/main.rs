@@ -22,6 +22,9 @@ struct Cli {
     /// Also print the result as JSON on stdout.
     #[arg(long, global = true)]
     json: bool,
+    /// Answer yes to the question with this id (used by the R package after asking).
+    #[arg(long, global = true, value_name = "ID", hide = true)]
+    confirmed: Vec<String>,
     #[command(subcommand)]
     command: Command,
 }
@@ -158,7 +161,7 @@ enum RCommand {
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
-    let ui = ui::Ui::new(cli.yes, cli.json);
+    let ui = ui::Ui::new(cli.yes, cli.json, cli.confirmed);
     let project = cli.project.as_deref();
     let result = match cli.command {
         Command::Init { path, r, name } => commands::init(&ui, path, r, name),
@@ -194,6 +197,12 @@ fn main() -> ExitCode {
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
+        // A program asked rok to do something that needs an answer: hand the question back.
+        Err(e) if e.downcast_ref::<ui::NeedsAnswer>().is_some() => {
+            let needs = e.downcast_ref::<ui::NeedsAnswer>().expect("checked");
+            println!("{}", needs.to_json());
+            ExitCode::from(2)
+        }
         Err(e) => {
             let mut msg = e.to_string();
             for cause in e.chain().skip(1) {

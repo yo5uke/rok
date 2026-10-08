@@ -175,3 +175,28 @@ fn runs_scripts_with_the_project_library() {
     assert!(!list["installed"].as_array().unwrap().is_empty());
     assert!(!list["available"].as_array().unwrap().is_empty());
 }
+
+#[test]
+#[ignore = "needs the network and R"]
+fn hands_questions_back_to_programs() {
+    let t = tempfile::tempdir().unwrap();
+    let home = t.path();
+    json(&rok(home, &["init", "proj", "--json"]));
+    let proj = home.join("proj");
+
+    // A nested project needs confirmation: with --json and no terminal, rok changes nothing
+    // and returns the question with exit status 2 (the R package asks it, then runs again).
+    let asked = rok(&proj, &["init", "sub", "--json"]);
+    assert_eq!(asked.status.code(), Some(2));
+    let needs: serde_json::Value = serde_json::from_slice(&asked.stdout).unwrap();
+    assert_eq!(needs["needs"]["id"], "init-nested");
+    assert_eq!(needs["needs"]["default"], false);
+    assert!(!proj.join("sub/rok.toml").exists());
+
+    let answered = json(&rok(
+        &proj,
+        &["init", "sub", "--json", "--confirmed", "init-nested"],
+    ));
+    assert_eq!(answered["name"], "sub");
+    assert!(proj.join("sub/rok.toml").is_file());
+}
