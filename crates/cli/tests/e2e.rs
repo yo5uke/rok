@@ -244,7 +244,8 @@ fn activates_projects_at_r_startup() {
                 let script = home.join("missing.R");
                 std::fs::write(
                     &script,
-                    "library(nopkg)\ntryCatch(library(nopkg2), error = function(e) NULL)\n",
+                    "library(nopkg)\ntryCatch(library(nopkg2), error = function(e) NULL)\n\
+                 cat('rlib:', getOption('rlib_restart_package_not_found'), '\\n')\n",
                 )
                 .unwrap();
                 script
@@ -256,6 +257,8 @@ fn activates_projects_at_r_startup() {
     let console = String::from_utf8_lossy(&r.stderr);
     assert!(console.contains("run `rok::add(\"nopkg\")`."), "{console}");
     assert!(!console.contains("nopkg2"), "{console}");
+    // rlang::check_installed() raises an error instead of offering install.packages().
+    assert!(String::from_utf8_lossy(&r.stdout).contains("rlib: FALSE"));
 
     // Out of sync in a non-interactive session: a warning, nothing synced (the default).
     let lib = stdout

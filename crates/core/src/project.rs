@@ -143,9 +143,13 @@ local({
   own <- if (nzchar(data)) file.path(data, "library", paste0("R-", minor)) else character()
   own <- own[dir.exists(own)]
   assign(".lib.loc", unique(c(normalizePath(lib), own, .Library)), envir = environment(.libPaths))
-  # A "there is no package called" error that no code handles gets a line on what to do; those
-  # that tryCatch(), try() or requireNamespace() handle never reach this handler. R refuses to
-  # add it with handlers on the stack (an IDE running this file inside tryCatch()): then none.
+  # A missing package that no code handles gets a line on what to do: errors from library(),
+  # loadNamespace() and pkg::, and from rlang::check_installed(), which here raises an error
+  # instead of offering install.packages() into the project library (where the next sync would
+  # remove it). Those that tryCatch(), try() or requireNamespace() handle never reach the
+  # handlers. R refuses to add them with handlers on the stack (an IDE running this file inside
+  # tryCatch()): then none.
+  if (length(hint)) options(rlib_restart_package_not_found = FALSE)
   on_stack <- function() {
     for (i in seq_len(sys.nframe())) {
       f <- sys.function(i)
@@ -155,22 +159,40 @@ local({
   }
   if (length(hint) && exists("globalCallingHandlers", baseenv()) && !on_stack()) {
     root <- getwd()
-    globalCallingHandlers(packageNotFoundError = function(cond) {
-      pkg <- cond$package
-      if (!is.character(pkg) || length(pkg) != 1L) return()
-      # In rok.lock (not synced) or not; packages rok does not manage get no line.
+    # One line per package: sync if rok.lock has it, add if not. Packages rok does not manage,
+    # and installed ones (older than asked for), get none.
+    lines_for <- function(pkgs) {
       lock <- tryCatch(readLines(file.path(root, "rok.lock"), warn = FALSE), error = function(e) character())
-      at <- match(paste0("name = \"", pkg, "\""), lock)
-      kind <- "add"
-      if (!is.na(at)) {
-        rest <- lock[-seq_len(at)]
-        entry <- rest[seq_len(match("", c(rest, "")) - 1L)]
-        if (any(grepl("unmanaged = true", entry, fixed = TRUE))) return()
-        kind <- "sync"
+      unlist(lapply(pkgs, function(pkg) {
+        if (nzchar(system.file(package = pkg))) return(NULL)
+        at <- match(paste0("name = \"", pkg, "\""), lock)
+        kind <- "add"
+        if (!is.na(at)) {
+          rest <- lock[-seq_len(at)]
+          entry <- rest[seq_len(match("", c(rest, "")) - 1L)]
+          if (any(grepl("unmanaged = true", entry, fixed = TRUE))) return(NULL)
+          kind <- "sync"
+        }
+        gsub("{package}", pkg, hint[[kind]], fixed = TRUE)
+      }))
+    }
+    globalCallingHandlers(
+      packageNotFoundError = function(cond) {
+        pkg <- cond$package
+        if (!is.character(pkg) || length(pkg) != 1L) return()
+        lines <- lines_for(pkg)
+        if (!length(lines)) return()
+        cond$message <- paste(c(conditionMessage(cond), lines), collapse = "\n")
+        stop(cond)
+      },
+      rlib_error_package_not_found = function(cond) {
+        if (!is.character(cond$pkg)) return()
+        lines <- lines_for(cond$pkg)
+        if (!length(lines)) return()
+        cond$footer <- c(cond$footer, lines)
+        stop(cond)
       }
-      cond$message <- paste0(conditionMessage(cond), "\n", gsub("{package}", pkg, hint[[kind]], fixed = TRUE))
-      stop(cond)
-    })
+    )
   }
 })
 "#;
