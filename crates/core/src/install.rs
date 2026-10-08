@@ -672,7 +672,9 @@ impl Context<'_> {
             .r_home
             .join("bin")
             .join(if cfg!(windows) { "R.exe" } else { "R" });
+        // R_HOME of another R (rok started from R) would point this R elsewhere.
         let status = Command::new(&r)
+            .env_remove("R_HOME")
             .args(["CMD", "INSTALL", "--no-docs", "--no-multiarch"])
             .arg(format!("--library={}", out.display()))
             .arg(source)

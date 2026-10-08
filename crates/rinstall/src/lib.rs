@@ -732,6 +732,7 @@ mod tests {
             "{found:?}"
         );
         let out = Command::new(r.rscript())
+            .env_remove("R_HOME")
             .args(["-e", "cat(as.character(getRversion()))"])
             .output()
             .unwrap();

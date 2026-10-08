@@ -731,7 +731,8 @@ pub fn run(
             cmd = std::process::Command::new(r.rscript());
         }
     }
-    let status = cmd.args(args).status()?;
+    // R_HOME of another R (rok started from R) would point this R elsewhere.
+    let status = cmd.env_remove("R_HOME").args(args).status()?;
     Ok(match status.code() {
         Some(0) => ExitCode::SUCCESS,
         Some(c) => ExitCode::from(u8::try_from(c).unwrap_or(1)),
