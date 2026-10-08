@@ -23,6 +23,7 @@ pub mod rdetect;
 pub mod repo;
 pub mod resolve;
 pub mod rpkgs;
+pub mod scan;
 pub mod status;
 pub mod syslibs;
 pub mod version;

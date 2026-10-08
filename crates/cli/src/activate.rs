@@ -11,12 +11,16 @@ use std::path::Path;
 use std::process::ExitCode;
 use std::time::Instant;
 
+use std::collections::BTreeSet;
+
 use rok_core::install::{self, LinkReport};
+use rok_core::lockfile::Lockfile;
 use rok_core::manifest::{Manifest, NonInteractive, OnStartup};
 use rok_core::ops::{self, Env, plural};
 use rok_core::rdetect::{self, RInstallation, RKind};
+use rok_core::scan::{self, Mode};
 
-use crate::commands::{explain_missing_libraries, find_project, summary};
+use crate::commands::{explain_missing_libraries, find_project, suggest_undeclared, summary};
 use crate::ui::Ui;
 
 /// The answer to the question asked before syncing at startup.
@@ -101,6 +105,7 @@ pub fn activate(
                 r.version,
                 plural(n)
             ));
+            suggest_new(ui, &project.root, &manifest, Some(l));
         }
         return Ok(ExitCode::SUCCESS);
     }
@@ -274,6 +279,9 @@ pub fn activate(
         let advice = ops::library_advice(&env, &lock, &missing, true);
         explain_missing_libraries(ui, &missing, &advice);
     }
+    if interactive {
+        suggest_new(ui, &project.root, &manifest, Some(&lock));
+    }
     if skipped.is_empty() {
         summary(ui, &report, &lock, start);
     } else {
@@ -285,6 +293,27 @@ pub fn activate(
         ));
     }
     Ok(ExitCode::SUCCESS)
+}
+
+/// Suggests declaring the packages the code newly uses (requirements chapter 8): only changed
+/// files are read, and each package is suggested once.
+fn suggest_new(ui: &Ui, root: &Path, manifest: &Manifest, lock: Option<&Lockfile>) {
+    let Ok((_, findings)) = ops::scan_findings(root, manifest, lock, Mode::Quick) else {
+        return;
+    };
+    let names: BTreeSet<String> = findings.undeclared.iter().map(|(n, _)| n.clone()).collect();
+    let Ok(new) = scan::new_since_last_time(root, &names) else {
+        return;
+    };
+    let shown = ops::ScanFindings {
+        undeclared: findings
+            .undeclared
+            .into_iter()
+            .filter(|(n, _)| new.contains(n))
+            .collect(),
+        unused: Vec::new(),
+    };
+    suggest_undeclared(ui, &shown, "rok::add");
 }
 
 /// Hands a question to activate.R.

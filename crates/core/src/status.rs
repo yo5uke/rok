@@ -115,6 +115,8 @@ pub struct Inputs<'a> {
     pub library: &'a BTreeMap<String, Installed>,
     /// Missing system libraries (Linux), if checked.
     pub system: Option<&'a SystemCheck>,
+    /// What the code scan found, if it ran.
+    pub scan: Option<&'a ops::ScanFindings>,
 }
 
 /// Missing shared libraries on Linux (requirements, chapters 6 and 7).
@@ -138,6 +140,7 @@ pub fn check(inputs: &Inputs) -> Vec<Problem> {
         r,
         library,
         system,
+        scan,
     } = *inputs;
     let mut problems = Vec::new();
     let (minor, _) = ops::manifest_r(manifest);
@@ -283,6 +286,49 @@ pub fn check(inputs: &Inputs) -> Vec<Problem> {
             details,
             fix,
         });
+    }
+
+    // 5. Suggestions from the code.
+    if let Some(f) = scan {
+        if !f.undeclared.is_empty() {
+            let n = f.undeclared.len();
+            let names: Vec<&str> = f.undeclared.iter().map(|(n, _)| n.as_str()).collect();
+            problems.push(Problem {
+                level: Level::Info,
+                code: "undeclared",
+                message: format!(
+                    "{n} package{} the code uses {} not declared in rok.toml.",
+                    ops::plural(n),
+                    if n == 1 { "is" } else { "are" }
+                ),
+                details: f
+                    .undeclared
+                    .iter()
+                    .map(|(name, why)| format!("{name} ({why})"))
+                    .collect(),
+                fix: Some(format!(
+                    "Run `rok add {}` to declare them.",
+                    names.join(" ")
+                )),
+            });
+        }
+        if !f.unused.is_empty() {
+            let n = f.unused.len();
+            problems.push(Problem {
+                level: Level::Info,
+                code: "unused",
+                message: format!(
+                    "{n} declared package{} {} not used in the code.",
+                    ops::plural(n),
+                    if n == 1 { "is" } else { "are" }
+                ),
+                details: f.unused.clone(),
+                fix: Some(format!(
+                    "If they are not needed, run `rok remove {}`.",
+                    f.unused.join(" ")
+                )),
+            });
+        }
     }
 
     // 6. Information.
@@ -532,6 +578,7 @@ mod tests {
             r: Some(&r),
             library: &lib,
             system: None,
+            scan: None,
         });
         assert_eq!(codes(&problems), ["mixed-dates"]);
         assert_eq!(problems[0].details, ["fixest 0.12.1 (2024-06-14)"]);
@@ -563,6 +610,7 @@ mod tests {
                 r: Some(&r),
                 library: lib,
                 system: None,
+                scan: None,
             })
         };
         assert!(run(&linked("4.6-x-source-gh-aaaaaaaaaaaa"), &m).is_empty());
@@ -618,6 +666,7 @@ mod tests {
             r: Some(&r),
             library: &lib,
             system: Some(&sys),
+            scan: None,
         });
         assert_eq!(
             codes(&problems),
@@ -627,6 +676,46 @@ mod tests {
         assert_eq!(
             problems[1].fix.as_deref(),
             Some("Run `sudo apt-get install -y libgdal34t64 libproj25`.")
+        );
+    }
+
+    #[test]
+    fn reports_scan_findings_as_information() {
+        let lib = BTreeMap::from([
+            (
+                "fixest".to_string(),
+                Installed::Linked {
+                    version: Some("0.12.1".parse().unwrap()),
+                    key: "k".into(),
+                },
+            ),
+            (
+                "Rcpp".to_string(),
+                Installed::Linked {
+                    version: Some("1.1.2".parse().unwrap()),
+                    key: "k".into(),
+                },
+            ),
+        ]);
+        let findings = ops::ScanFindings {
+            undeclared: vec![("sf".into(), "for geom_sf() in a.R:3".into())],
+            unused: vec!["fixest".into()],
+        };
+        let (m, l, r) = (manifest("fixest = \"*\""), lock(), r("4.6.1"));
+        let problems = check(&Inputs {
+            manifest: &m,
+            lock: Some(&l),
+            r: Some(&r),
+            library: &lib,
+            system: None,
+            scan: Some(&findings),
+        });
+        assert_eq!(codes(&problems), ["undeclared", "unused", "mixed-dates"]);
+        assert!(problems.iter().all(|p| p.level == Level::Info));
+        assert_eq!(problems[0].details, ["sf (for geom_sf() in a.R:3)"]);
+        assert_eq!(
+            problems[0].fix.as_deref(),
+            Some("Run `rok add sf` to declare them.")
         );
     }
 
@@ -662,6 +751,7 @@ mod tests {
             r: None,
             library: &lib,
             system: None,
+            scan: None,
         });
         assert_eq!(
             codes(&problems),
@@ -697,6 +787,7 @@ mod tests {
             r: Some(&r),
             library: &lib,
             system: None,
+            scan: None,
         });
         assert!(problems.iter().any(
             |p| p.code == "r-patch" && p.message == "Using R 4.6.0; rok.lock records R 4.6.1."

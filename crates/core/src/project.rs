@@ -140,7 +140,7 @@ local({
 "#;
 
 /// Files that stay on each machine.
-const ROK_GITIGNORE: &str = "library/\nundo/\n";
+const ROK_GITIGNORE: &str = "library/\nundo/\nscan.json\n";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Project {
@@ -261,19 +261,23 @@ impl Project {
         write_atomic(&l, lock.to_toml_string().as_bytes()).map_err(io_err(&l))
     }
 
-    /// Creates `.rok/activate.R` and `.rok/.gitignore`, and makes `.Rprofile` run the hook.
-    /// Returns whether an existing `.Rprofile` was changed.
-    /// Rewrites `.rok/activate.R` if it differs from this version of rok's (after rok was
-    /// updated). Returns whether it changed.
+    /// Rewrites `.rok/activate.R` and `.rok/.gitignore` if they differ from this version of
+    /// rok's (after rok was updated). Returns whether anything changed.
     pub fn refresh_activate(&self) -> Result<bool, ProjectError> {
-        let p = self.rok_dir().join("activate.R");
-        if std::fs::read_to_string(&p).is_ok_and(|t| t == ACTIVATE_R) {
-            return Ok(false);
+        let mut changed = false;
+        for (name, content) in [("activate.R", ACTIVATE_R), (".gitignore", ROK_GITIGNORE)] {
+            let p = self.rok_dir().join(name);
+            if std::fs::read_to_string(&p).is_ok_and(|t| t == content) {
+                continue;
+            }
+            write_atomic(&p, content.as_bytes()).map_err(io_err(&p))?;
+            changed = true;
         }
-        write_atomic(&p, ACTIVATE_R.as_bytes()).map_err(io_err(&p))?;
-        Ok(true)
+        Ok(changed)
     }
 
+    /// Creates `.rok/activate.R` and `.rok/.gitignore`, and makes `.Rprofile` run the hook.
+    /// Returns whether an existing `.Rprofile` was changed.
     pub fn install_startup_hook(&self) -> Result<bool, ProjectError> {
         let dir = self.rok_dir();
         for (name, content) in [("activate.R", ACTIVATE_R), (".gitignore", ROK_GITIGNORE)] {
@@ -328,7 +332,7 @@ mod tests {
         assert!(t.path().join(".rok/activate.R").is_file());
         assert_eq!(
             std::fs::read_to_string(t.path().join(".rok/.gitignore")).unwrap(),
-            "library/\nundo/\n"
+            "library/\nundo/\nscan.json\n"
         );
     }
 

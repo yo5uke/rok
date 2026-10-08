@@ -1,0 +1,49 @@
+# Rules of the code scanner (requirements chapter 7): when the condition holds, suggest adding
+# the packages. They are data, so they can be improved apart from the rest of rok. Projects add
+# their own with [[scan.rule]] in rok.toml, in the same form.
+#
+# Conditions (`when`):
+#   file   = ["qmd", "Rmd"]            a file with one of these extensions exists
+#   chunk  = "python"                   a .qmd or .Rmd chunk in this language exists
+#   call   = ["geom_sf", "coord_sf"]    one of these functions is called (`pkg::fun` also matches
+#                                       an unqualified call of `fun`)
+#   arg    = "output"                   ... with this argument (by name, or at `position`, from 1)
+#   value  = ["gt", "flextable"]        ... equal to one of these strings
+#   suffix = ".svg"                     ... or ending like this
+# `suggest` lists the packages; `suggest_value = true` suggests the argument's value itself.
+
+[[rule]]
+when = { file = ["qmd", "Rmd", "rmd"] }
+suggest = ["knitr", "rmarkdown"]
+
+[[rule]]
+when = { chunk = "python" }
+suggest = ["reticulate"]
+
+[[rule]]
+when = { call = "geom_hex" }
+suggest = ["hexbin"]
+
+[[rule]]
+when = { call = ["geom_sf", "coord_sf"] }
+suggest = ["sf"]
+
+[[rule]]
+when = { call = "coord_map" }
+suggest = ["mapproj"]
+
+[[rule]]
+when = { call = "map_data" }
+suggest = ["maps"]
+
+[[rule]]
+when = { call = "geom_quantile" }
+suggest = ["quantreg"]
+
+[[rule]]
+when = { call = "ggsave", arg = "filename", position = 1, suffix = ".svg" }
+suggest = ["svglite"]
+
+[[rule]]
+when = { call = "modelsummary", arg = "output", value = ["gt", "flextable", "kableExtra", "huxtable"] }
+suggest_value = true

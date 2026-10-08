@@ -16,6 +16,7 @@ use rok_core::project::Project;
 use rok_core::rdetect::RInstallation;
 use rok_core::resolve::Origin;
 use rok_core::rpkgs::is_base;
+use rok_core::scan::Mode;
 use rok_core::version::Version;
 use serde_json::json;
 
@@ -554,6 +555,31 @@ fn declared_name(manifest: &Manifest, arg: &str) -> anyhow::Result<String> {
         .ok_or_else(|| anyhow::anyhow!("No package from {owner}/{repo} is declared in rok.toml."))
 }
 
+/// Where the code uses `name`, at most `max` places: `file:line`, or why a rule needs it.
+fn usage_lines(report: &rok_core::scan::Report, name: &str, max: usize) -> Vec<String> {
+    let mut lines: Vec<String> = report
+        .used
+        .get(name)
+        .into_iter()
+        .flatten()
+        .map(|p| p.to_string())
+        .chain(
+            report
+                .suggested
+                .get(name)
+                .into_iter()
+                .flatten()
+                .map(|(why, p)| format!("for {why} in {p}")),
+        )
+        .collect();
+    let total = lines.len();
+    lines.truncate(max);
+    if total > max {
+        lines.push(format!("… and {} more", total - max));
+    }
+    lines
+}
+
 // ---- remove ----
 
 pub fn remove(ui: &Ui, project_dir: Option<&Path>, packages: &[String]) -> anyhow::Result<()> {
@@ -583,6 +609,33 @@ pub fn remove(ui: &Ui, project_dir: Option<&Path>, packages: &[String]) -> anyho
             users.join(", "),
             if users.len() == 1 { "s" } else { "" }
         );
+    }
+    // Packages the code still uses: show where, and ask (the default keeps them).
+    if let Ok((report, _)) =
+        ops::scan_findings(&project.root, &manifest, old_lock.as_ref(), Mode::Full)
+    {
+        let used: Vec<&String> = packages.iter().filter(|p| report.needs(p)).collect();
+        for p in &used {
+            ui.warn(&format!("{p} is still used in the code:"));
+            for line in usage_lines(&report, p, 5) {
+                ui.bullet(&line);
+            }
+        }
+        if !used.is_empty()
+            && !ui.confirm(
+                "remove-used",
+                &format!(
+                    "Remove {} anyway?",
+                    used.iter()
+                        .map(|s| s.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+                false,
+            )?
+        {
+            bail!("Cancelled. Nothing was changed.");
+        }
     }
     for p in &packages {
         doc.remove_dependency(p);
@@ -658,8 +711,50 @@ pub fn sync(ui: &Ui, project_dir: Option<&Path>, locked: bool) -> anyhow::Result
         ));
     }
     summary(ui, &report, &lock, start);
+    // sync() reads every file (startup reads only the changed ones).
+    if let Ok((_, findings)) = ops::scan_findings(&project.root, &manifest, Some(&lock), Mode::Full)
+    {
+        suggest_undeclared(ui, &findings, "rok add");
+    }
     ui.result(report_json("sync", &changes, &report));
     Ok(())
+}
+
+/// Suggests declaring the packages the code uses but rok.toml does not declare. `add` is how
+/// to add them where the person is (`rok add`, or `rok::add` in R).
+pub(crate) fn suggest_undeclared(ui: &Ui, findings: &ops::ScanFindings, add: &str) {
+    if findings.undeclared.is_empty() {
+        return;
+    }
+    let n = findings.undeclared.len();
+    ui.info(&format!(
+        "The code uses {n} package{} that rok.toml does not declare:",
+        plural(n)
+    ));
+    for (name, why) in &findings.undeclared {
+        ui.bullet(&format!("{name} ({why})"));
+    }
+    let names: Vec<&str> = findings
+        .undeclared
+        .iter()
+        .map(|(n, _)| n.as_str())
+        .collect();
+    let command = if add.contains("::") {
+        format!(
+            "{add}({})",
+            names
+                .iter()
+                .map(|n| format!("\"{n}\""))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    } else {
+        format!("{add} {}", names.join(" "))
+    };
+    ui.bullet(&format!(
+        "Add {} with `{command}`.",
+        if n == 1 { "it" } else { "them" }
+    ));
 }
 
 /// Updates rok.lock if rok.toml changed (unless `locked`), then makes the library match it.
@@ -993,12 +1088,21 @@ pub fn status(ui: &Ui, project_dir: Option<&Path>, packages: bool) -> anyhow::Re
             r_advice,
         }
     });
+    // What the code uses (only changed files are read again).
+    let findings = match ops::scan_findings(&project.root, &manifest, lock.as_ref(), Mode::Full) {
+        Ok((_, f)) => Some(f),
+        Err(e) => {
+            ui.warn(&format!("The code was not scanned: {e}"));
+            None
+        }
+    };
     let problems = status::check(&status::Inputs {
         manifest: &manifest,
         lock: lock.as_ref(),
         r,
         library: &entries,
         system: system.as_ref(),
+        scan: findings.as_ref(),
     });
     let failing = problems.iter().any(|p| p.level != Level::Info);
 
@@ -1097,9 +1201,17 @@ pub fn why(ui: &Ui, project_dir: Option<&Path>, package: &str) -> anyhow::Result
         .iter()
         .map(|(n, _)| n.clone())
         .collect();
-    let Some(lines) = rok_core::graph::why(&lock, &declared, package) else {
+    let Some(mut lines) = rok_core::graph::why(&lock, &declared, package) else {
         bail!("{package} is not in rok.lock.");
     };
+    // Where the code uses it directly (requirements chapter 5).
+    if let Ok((report, _)) = ops::scan_findings(&project.root, &manifest, Some(&lock), Mode::Full) {
+        let places = usage_lines(&report, package, 5);
+        if !places.is_empty() {
+            lines.push("Used in the code:".to_string());
+            lines.extend(places.into_iter().map(|p| format!("  {p}")));
+        }
+    }
     print_lines(ui, "why", &lines);
     Ok(())
 }

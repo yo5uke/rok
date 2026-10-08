@@ -20,6 +20,7 @@ use crate::repo::{self, RepoError, Repositories};
 use crate::resolve::{
     self, Candidate, Origin, Request, ResolveError, Resolved, SnapshotSource, SourceError,
 };
+use crate::scan;
 use crate::syslibs::{self, AptAdvice, SystemLibraries};
 use crate::version::Version;
 
@@ -1055,6 +1056,57 @@ pub fn library_advice(
         }
     }
     syslibs::apt_advice(missing, &sysreqs)
+}
+
+/// What the code scan means for the declarations (requirements chapter 7).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ScanFindings {
+    /// Packages the code needs that rok.toml does not declare and the project does not have,
+    /// with the first reason (`file:line`, or `for geom_sf() in file:line`).
+    pub undeclared: Vec<(String, String)>,
+    /// Declared packages the code never uses (they may still be needed in other ways).
+    pub unused: Vec<String>,
+}
+
+/// Scans the project's code and compares it with the declarations. Packages that are part of
+/// R, rok itself, unmanaged packages and packages the lockfile already has are not suggested.
+pub fn scan_findings(
+    root: &Path,
+    manifest: &Manifest,
+    lock: Option<&Lockfile>,
+    mode: scan::Mode,
+) -> Result<(scan::Report, ScanFindings), scan::ScanError> {
+    let rules = scan::rules(&manifest.scan_rules)?;
+    let report = scan::scan(root, &rules, mode)?;
+    let declared: HashSet<&str> = manifest
+        .dependencies
+        .iter()
+        .map(|(n, _)| n.as_str())
+        .collect();
+    let skip = |name: &str| {
+        declared.contains(name)
+            || crate::rpkgs::is_base(name)
+            || name == "rok"
+            || manifest.unmanaged.iter().any(|u| u == name)
+            || lock.is_some_and(|l| l.package(name).is_some())
+    };
+    let mut undeclared: Vec<(String, String)> = report
+        .used
+        .keys()
+        .chain(report.suggested.keys())
+        .filter(|n| !skip(n))
+        .filter_map(|n| Some((n.clone(), report.first_reason(n)?)))
+        .collect();
+    undeclared.sort_by(|a, b| name_order(&a.0, &b.0));
+    undeclared.dedup_by(|a, b| a.0 == b.0);
+    let mut unused: Vec<String> = manifest
+        .dependencies
+        .iter()
+        .map(|(n, _)| n.clone())
+        .filter(|n| !report.needs(n))
+        .collect();
+    unused.sort_by(|a, b| name_order(a, b));
+    Ok((report, ScanFindings { undeclared, unused }))
 }
 
 pub fn plural(n: usize) -> &'static str {

@@ -207,3 +207,36 @@ fn agrees_with_ldd_on_missing_libraries() {
     }
     eprintln!("checked {checked} shared objects");
 }
+
+/// Scans the project in ROK_SCAN_DIR and prints what was found (read-only when the project has
+/// no .rok directory, as nothing is cached then).
+#[test]
+#[ignore = "reads a project on this machine"]
+fn scans_a_real_project() {
+    let Some(dir) = std::env::var_os("ROK_SCAN_DIR") else {
+        return;
+    };
+    let rules = rok_core::scan::builtin_rules();
+    let start = Instant::now();
+    let r = rok_core::scan::scan(
+        std::path::Path::new(&dir),
+        &rules,
+        rok_core::scan::Mode::Full,
+    )
+    .unwrap();
+    eprintln!("scanned in {:?}", start.elapsed());
+    for (pkg, places) in &r.used {
+        eprintln!(
+            "used {pkg}: {}",
+            places
+                .iter()
+                .map(|p| p.to_string())
+                .take(3)
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+    for (pkg, why) in &r.suggested {
+        eprintln!("suggested {pkg}: for {} in {}", why[0].0, why[0].1);
+    }
+}

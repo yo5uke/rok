@@ -255,3 +255,66 @@ fn activates_projects_at_r_startup() {
     std::fs::remove_file(std::path::Path::new(&lib).join("R6")).unwrap();
     assert_eq!(activate(&[]).status.code(), Some(3));
 }
+
+#[test]
+#[ignore = "needs the network and R"]
+fn scans_the_code_for_packages() {
+    let t = tempfile::tempdir().unwrap();
+    let home = t.path();
+    json(&rok(home, &["init", "proj", "--json"]));
+    let proj = home.join("proj");
+    json(&rok(&proj, &["add", "R6", "--json"]));
+    std::fs::create_dir_all(proj.join("code")).unwrap();
+    std::fs::write(
+        proj.join("code/a.R"),
+        "library(R6)\n# library(commented)\np <- ggplot2::ggplot() + geom_sf()\n",
+    )
+    .unwrap();
+
+    // status: the undeclared packages, with where; nothing about the comment.
+    let status = json(&rok(&proj, &["status", "--json"]));
+    let undeclared = status["problems"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["code"] == "undeclared")
+        .expect("undeclared packages reported");
+    let details: Vec<&str> = undeclared["details"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|d| d.as_str().unwrap())
+        .collect();
+    assert_eq!(
+        details,
+        [
+            "ggplot2 (code/a.R:3)",
+            "sf (for geom_sf()/coord_sf() in code/a.R:3)"
+        ]
+    );
+
+    // why: where the code uses it.
+    let why = rok(&proj, &["why", "R6"]);
+    assert!(String::from_utf8_lossy(&why.stdout).contains("code/a.R:1"));
+
+    // remove: a package the code uses needs an answer, and the default keeps it.
+    let asked = rok(&proj, &["remove", "R6", "--json"]);
+    assert_eq!(asked.status.code(), Some(2));
+    let needs: serde_json::Value = serde_json::from_slice(&asked.stdout).unwrap();
+    assert_eq!(needs["needs"]["id"], "remove-used");
+    assert_eq!(needs["needs"]["default"], false);
+    assert!(
+        std::fs::read_to_string(proj.join("rok.toml"))
+            .unwrap()
+            .contains("R6")
+    );
+    json(&rok(
+        &proj,
+        &["remove", "R6", "--json", "--confirmed", "remove-used"],
+    ));
+    assert!(
+        !std::fs::read_to_string(proj.join("rok.toml"))
+            .unwrap()
+            .contains("R6")
+    );
+}
