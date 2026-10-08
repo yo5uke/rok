@@ -401,7 +401,14 @@ pub fn pin(
     let new_manifest = Manifest::parse(&new_text)?;
 
     ui.step("Resolving dependencies");
-    let lock = ops::resolve_lock_with(&env, &new_manifest, old_lock.as_ref(), &target, &keep)?;
+    let lock = ops::resolve_lock_with(
+        &env,
+        &project.root,
+        &new_manifest,
+        old_lock.as_ref(),
+        &target,
+        &keep,
+    )?;
     if let Some(checker) = BinaryChecker::new(&env, &target) {
         let still = pin::missing_binaries(&checker, &pin::cran_items(&lock))?;
         if !still.is_empty() {

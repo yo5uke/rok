@@ -100,8 +100,18 @@ pub fn activate(
     {
         if interactive {
             let n = l.packages.len();
+            let unmanaged = l
+                .packages
+                .iter()
+                .filter(|p| p.source == rok_core::lockfile::Source::Unmanaged)
+                .count();
+            let unmanaged = if unmanaged > 0 {
+                format!(", {unmanaged} unmanaged")
+            } else {
+                String::new()
+            };
             ui.success(&format!(
-                "rok: {name} (R {}, {n} package{})",
+                "rok: {name} (R {}, {n} package{}{unmanaged})",
                 r.version,
                 plural(n)
             ));
@@ -149,7 +159,7 @@ pub fn activate(
                 .filter(|l| l.r.minor() == minor)
                 .map_or(&r.version, |l| &l.r)
                 .clone();
-            match ops::resolve_lock(&env, &manifest, old_lock.as_ref(), &lock_r) {
+            match ops::resolve_lock(&env, &project.root, &manifest, old_lock.as_ref(), &lock_r) {
                 Ok(lock) => {
                     let changes = ops::diff(old_lock.as_ref(), &lock);
                     (lock, changes, true)

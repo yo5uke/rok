@@ -45,6 +45,8 @@ pub struct ManifestCopy {
     /// Declarations other than plain CRAN, in a canonical form such as
     /// `github:yo5uke/coresynth` or `repo:multiverse` (see `ops::source_key`).
     pub sources: BTreeMap<String, String>,
+    /// `[unmanaged]` packages, sorted.
+    pub unmanaged: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -83,6 +85,9 @@ pub enum Source {
         reference: GitRef,
         commit: String,
     },
+    /// Listed in `[unmanaged]`: installed by the user (for example from Bioconductor); rok
+    /// only records the installed version.
+    Unmanaged,
 }
 
 /// The Git origin of a package (`RemoteUrl`, `RemoteSha` and `RemoteSubdir` in its
@@ -103,7 +108,7 @@ impl Source {
     pub fn snapshot(&self) -> Option<&str> {
         match self {
             Source::Repository { snapshot, .. } => snapshot.as_deref(),
-            Source::GitHub { .. } => None,
+            Source::GitHub { .. } | Source::Unmanaged => None,
         }
     }
 
@@ -122,6 +127,7 @@ impl Source {
                 commit,
                 ..
             } => format!("github {owner}/{repo}@{}", &commit[..commit.len().min(7)]),
+            Source::Unmanaged => "unmanaged".to_string(),
         }
     }
 }
@@ -176,6 +182,8 @@ struct RawManifest {
     constraints: BTreeMap<String, String>,
     #[serde(default)]
     sources: BTreeMap<String, String>,
+    #[serde(default)]
+    unmanaged: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -209,6 +217,8 @@ struct RawSource {
     tag: Option<String>,
     rev: Option<String>,
     commit: Option<String>,
+    #[serde(default)]
+    unmanaged: bool,
 }
 
 fn is_hex(s: &str, len: usize) -> bool {
@@ -222,6 +232,17 @@ impl RawSource {
             && !crate::date::is_valid(date)
         {
             return Err(invalid(&format!("invalid snapshot date `{date}`")));
+        }
+        if self.unmanaged {
+            let others = self.repository.is_some()
+                || self.github.is_some()
+                || self.url.is_some()
+                || self.snapshot.is_some()
+                || self.commit.is_some();
+            if others {
+                return Err(invalid("an unmanaged package has no other source fields"));
+            }
+            return Ok(Source::Unmanaged);
         }
         match (self.repository, self.github) {
             (Some(repository), None) => {
@@ -382,6 +403,7 @@ impl Lockfile {
                 dependencies: raw.manifest.dependencies,
                 constraints,
                 sources: raw.manifest.sources,
+                unmanaged: raw.manifest.unmanaged,
             },
             packages,
         })
@@ -432,6 +454,9 @@ impl Lockfile {
                 sources.insert(name, self.manifest.sources[name].as_str().into());
             }
             manifest["sources"] = value(sources);
+        }
+        if !self.manifest.unmanaged.is_empty() {
+            manifest["unmanaged"] = value(sorted_array(&self.manifest.unmanaged));
         }
         doc["manifest"] = Item::Table(manifest);
 
@@ -488,6 +513,9 @@ impl Lockfile {
                         }
                     }
                     source.insert("commit", commit.as_str().into());
+                }
+                Source::Unmanaged => {
+                    source.insert("unmanaged", true.into());
                 }
             }
             t["source"] = value(source);
@@ -584,6 +612,12 @@ sources = { coresynth = "github:yo5uke/coresynth", polars = "repo:multiverse" }
 name = "coresynth"
 version = "0.3.0"
 source = { github = "yo5uke/coresynth", tag = "v0.3.0", commit = "0123456789abcdef0123456789abcdef01234567" }
+dependencies = []
+
+[[package]]
+name = "limma"
+version = "3.60.0"
+source = { unmanaged = true }
 dependencies = []
 
 [[package]]

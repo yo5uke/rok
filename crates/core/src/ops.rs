@@ -174,10 +174,13 @@ pub fn manifest_copy(manifest: &Manifest) -> ManifestCopy {
         .iter()
         .filter_map(|(n, spec)| source_key(spec).map(|k| (n.clone(), k)))
         .collect();
+    let mut unmanaged = manifest.unmanaged.clone();
+    unmanaged.sort_by(|a, b| name_order(a, b));
     ManifestCopy {
         dependencies,
         constraints,
         sources,
+        unmanaged,
     }
 }
 
@@ -252,18 +255,21 @@ pub struct Keep {
 /// Resolves the manifest into a lockfile. Versions in `old` are kept when allowed; their
 /// SHA-256 values are carried over, and missing ones are looked up on P3M (case B: only the
 /// current CRAN version has one).
+/// `root` is the project's directory: unmanaged packages are read from its library.
 pub fn resolve_lock(
     env: &Env,
+    root: &Path,
     manifest: &Manifest,
     old: Option<&Lockfile>,
     r_version: &Version,
 ) -> Result<Lockfile, OpError> {
-    resolve_lock_with(env, manifest, old, r_version, &Keep::default())
+    resolve_lock_with(env, root, manifest, old, r_version, &Keep::default())
 }
 
 /// [`resolve_lock`] with control over what is kept from `old` (see [`Keep`]).
 pub fn resolve_lock_with(
     env: &Env,
+    root: &Path,
     manifest: &Manifest,
     old: Option<&Lockfile>,
     r_version: &Version,
@@ -400,6 +406,27 @@ pub fn resolve_lock_with(
     // Declared constraints that exclude the snapshot's version need older releases: they are
     // taken from the past snapshots in which they were current (requirements, chapter 7).
     let index = env.p3m.index(date)?;
+    // Unmanaged packages: the installed version is a fixed candidate, and its dependencies
+    // that rok provides are resolved too (requirements chapter 7). Dependencies rok cannot
+    // provide (such as other Bioconductor packages) are left to the user.
+    let (minor, _) = manifest_r(manifest);
+    let library = crate::project::Project::new(root).library(&minor, &env.platform);
+    for name in &manifest.unmanaged {
+        let Some(entry) = installed_entry(&library, name) else {
+            continue;
+        };
+        let provided = |dep: &str| {
+            index.get(dep).is_some()
+                || manifest.dependency(dep).is_some()
+                || manifest.unmanaged.iter().any(|u| u == dep)
+        };
+        let mut candidate = Candidate::from_entry(&entry, Origin::Unmanaged);
+        candidate.r_constraint = Constraint::any();
+        candidate.dependencies.retain(|d| provided(&d.name));
+        candidate.linking_to.clear();
+        requirements.push((name.clone(), Constraint::any()));
+        fixed.push((name.clone(), vec![candidate]));
+    }
     let historical: HashSet<String> = requirements
         .iter()
         .filter(|(name, _)| fixed.iter().all(|(f, _)| f != name))
@@ -453,6 +480,7 @@ pub fn resolve_lock_with(
     for (r, looked_up) in resolved.iter().zip(looked_up) {
         let prev = same(r);
         let source = match &r.origin {
+            Origin::Unmanaged => Source::Unmanaged,
             Origin::Snapshot(d) => Source::Repository {
                 repository: "cran".to_string(),
                 url: None,
@@ -465,7 +493,7 @@ pub fn resolve_lock_with(
                 snapshot: None,
                 remote: prev.and_then(|p| match &p.source {
                     Source::Repository { remote, .. } => remote.clone(),
-                    Source::GitHub { .. } => None,
+                    Source::GitHub { .. } | Source::Unmanaged => None,
                 }),
             },
             Origin::GitHub {
@@ -523,6 +551,14 @@ pub fn resolve_lock_with(
         manifest: manifest_copy(manifest),
         packages,
     })
+}
+
+/// The DESCRIPTION of a package installed in `library`, as an index entry.
+fn installed_entry(library: &Path, name: &str) -> Option<IndexEntry> {
+    let text = std::fs::read_to_string(library.join(name).join("DESCRIPTION")).ok()?;
+    Index::parse_repository("installed", &text)
+        .get(name)
+        .cloned()
 }
 
 /// Whether a locked source is where a resolved version comes from (snapshot dates aside).
@@ -614,6 +650,7 @@ pub fn origin_label(source: &Source) -> String {
     match source {
         Source::Repository { repository, .. } if repository == "cran" => "CRAN".to_string(),
         Source::Repository { repository, .. } => repository.clone(),
+        Source::Unmanaged => "unmanaged".to_string(),
         Source::GitHub {
             owner,
             repo,
@@ -784,13 +821,15 @@ pub fn cached_library(
         .collect())
 }
 
-/// What the library needs for `lock`.
+/// What the library needs for `lock` (unmanaged packages are the user's to install).
 fn wanted_from_lock(lock: &Lockfile, manifest: &Manifest) -> Result<Vec<Wanted>, OpError> {
     lock
         .packages
         .iter()
+        .filter(|p| p.source != Source::Unmanaged)
         .map(|p| {
             let origin = match &p.source {
+                Source::Unmanaged => unreachable!("left out above"),
                 Source::Repository {
                     repository,
                     snapshot,
@@ -835,7 +874,7 @@ fn wanted_from_lock(lock: &Lockfile, manifest: &Manifest) -> Result<Vec<Wanted>,
                 env: p.env.clone(),
                 remote: match &p.source {
                     Source::Repository { remote, .. } => remote.clone(),
-                    Source::GitHub { .. } => None,
+                    Source::GitHub { .. } | Source::Unmanaged => None,
                 },
             })
         })

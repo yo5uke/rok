@@ -61,6 +61,8 @@ pub enum Origin {
         reference: GitRef,
         commit: String,
     },
+    /// Installed by the user (`[unmanaged]`): only recorded.
+    Unmanaged,
 }
 
 impl fmt::Display for Origin {
@@ -74,6 +76,7 @@ impl fmt::Display for Origin {
                 commit,
                 ..
             } => write!(f, "{owner}/{repo}@{}", &commit[..commit.len().min(7)]),
+            Origin::Unmanaged => f.write_str("unmanaged"),
         }
     }
 }

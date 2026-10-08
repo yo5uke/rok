@@ -202,6 +202,16 @@ pub fn check(inputs: &Inputs) -> Vec<Problem> {
     if let Some(l) = lock {
         let mut details = Vec::new();
         for p in &l.packages {
+            // Unmanaged packages are the user's to install; only a missing one is a problem.
+            if p.source == Source::Unmanaged {
+                if !library.contains_key(&p.name) {
+                    details.push(format!(
+                        "{} is not installed (it is unmanaged: install it yourself, for example with BiocManager::install())",
+                        p.name
+                    ));
+                }
+                continue;
+            }
             match library.get(&p.name) {
                 None => details.push(format!("{} {} is not installed", p.name, p.version)),
                 Some(Installed::Linked { version: None, .. }) => details.push(format!(
@@ -533,7 +543,7 @@ mod tests {
     fn lock() -> Lockfile {
         Lockfile::parse(
             "version = 1\ngenerated-by = \"rok\"\n[r]\nversion = \"4.6.1\"\n[snapshot]\ndate = \"2026-10-01\"\nrepository = \"x\"\n\
-             [manifest]\ndependencies = [\"fixest\"]\n\
+             [manifest]\ndependencies = [\"fixest\"]\nunmanaged = [\"limma\"]\n\
              [[package]]\nname = \"fixest\"\nversion = \"0.12.1\"\nsource = { repository = \"cran\", snapshot = \"2024-06-14\" }\ndependencies = [\"Rcpp\"]\n\
              [[package]]\nname = \"Rcpp\"\nversion = \"1.1.2\"\nsource = { repository = \"cran\", snapshot = \"2026-10-01\" }\n",
         )
@@ -589,7 +599,7 @@ mod tests {
         let commit = "a".repeat(40);
         let l = Lockfile::parse(&format!(
             "version = 1\ngenerated-by = \"rok\"\n[r]\nversion = \"4.6.1\"\n[snapshot]\ndate = \"2026-10-01\"\nrepository = \"x\"\n\
-             [manifest]\ndependencies = [\"praise\"]\nsources = {{ praise = \"github:o/praise\" }}\n\
+             [manifest]\ndependencies = [\"praise\"]\nsources = {{ praise = \"github:o/praise\" }}\nunmanaged = [\"limma\"]\n\
              [[package]]\nname = \"praise\"\nversion = \"1.0.0\"\nsource = {{ github = \"o/praise\", commit = \"{commit}\" }}\n"
         ))
         .unwrap();

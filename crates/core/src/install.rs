@@ -199,6 +199,7 @@ impl Context<'_> {
             Origin::Snapshot(_) => base,
             Origin::Repository { url, .. } => format!("{base}-repo-{}", short_hash(url)),
             Origin::GitHub { commit, .. } => format!("{base}{}", github_key_suffix(commit)),
+            Origin::Unmanaged => base,
         }
     }
 
@@ -207,7 +208,7 @@ impl Context<'_> {
         let binary = match &w.origin {
             Origin::Snapshot(_) => self.binary_key(),
             Origin::Repository { url, .. } => self.repo_binary_key(url),
-            Origin::GitHub { .. } => None,
+            Origin::GitHub { .. } | Origin::Unmanaged => None,
         };
         binary
             .and_then(|k| self.cache.get(&w.name, &w.version, &k))
@@ -300,6 +301,7 @@ impl Context<'_> {
                     }
                 }
                 Origin::GitHub { .. } => Ok(Plan::Source { git: false }),
+                Origin::Unmanaged => Err(unmanaged(w)),
             }
         });
         results.into_iter().collect()
@@ -369,6 +371,7 @@ impl Context<'_> {
     /// tarball's SHA-256 is returned when it can be recorded in the lockfile.
     fn download_source(&self, w: &Wanted, dir: &Path) -> Result<Fetched, InstallError> {
         match &w.origin {
+            Origin::Unmanaged => Err(unmanaged(w)),
             Origin::Snapshot(date) => {
                 let (path, sha256) = self.download_cran_source(w, date, dir)?;
                 Ok(Fetched {
@@ -781,6 +784,15 @@ fn on_path(cmd: &str) -> bool {
     }
     std::env::var_os("PATH")
         .is_some_and(|path| std::env::split_paths(&path).any(|d| d.join(cmd).is_file()))
+}
+
+/// Unmanaged packages are installed by the user, never by rok.
+fn unmanaged(w: &Wanted) -> InstallError {
+    InstallError::SourceUnavailable {
+        name: w.name.clone(),
+        version: w.version.clone(),
+        from: "rok: it is unmanaged, so install it yourself".to_string(),
+    }
 }
 
 /// The cache key of a release rebuilt from its Git origin: kept apart from builds of the

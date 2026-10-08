@@ -113,6 +113,7 @@ pub(crate) fn sync_library(
                     format!("`{alias}` has no binary for R {minor} on {}", env.platform)
                 }
                 Origin::GitHub { owner, repo, .. } => format!("from GitHub {owner}/{repo}"),
+                Origin::Unmanaged => "unmanaged".to_string(),
             };
             ui.bullet(&format!("{} {} ({why})", w.name, w.version));
         }
@@ -678,7 +679,14 @@ fn apply(
         .map_or(&r.version, |l| &l.r)
         .clone();
     ui.step("Resolving dependencies");
-    let mut lock = ops::resolve_lock_with(env, manifest, old_lock.as_ref(), &lock_r, keep)?;
+    let mut lock = ops::resolve_lock_with(
+        env,
+        &project.root,
+        manifest,
+        old_lock.as_ref(),
+        &lock_r,
+        keep,
+    )?;
     let changes = ops::diff(old_lock.as_ref(), &lock);
     let report = sync_library(ui, env, project, manifest, &mut lock, &r)?;
     project.save(manifest_text, &lock, true)?;
@@ -784,7 +792,7 @@ fn sync_project(
                 .filter(|l| l.r.minor() == r.version.minor())
                 .map_or(&r.version, |l| &l.r)
                 .clone();
-            let lock = ops::resolve_lock(env, manifest, old_lock.as_ref(), &lock_r)?;
+            let lock = ops::resolve_lock(env, &project.root, manifest, old_lock.as_ref(), &lock_r)?;
             let changes = ops::diff(old_lock.as_ref(), &lock);
             (lock, changes, true)
         }
@@ -876,7 +884,8 @@ pub fn update(
             nothing: true,
             ..Default::default()
         };
-        let lock = ops::resolve_lock_with(&env, &m, Some(&old_lock), &lock_r, &keep)?;
+        let lock =
+            ops::resolve_lock_with(&env, &project.root, &m, Some(&old_lock), &lock_r, &keep)?;
         (m, lock)
     } else {
         for p in &packages {
@@ -889,7 +898,14 @@ pub fn update(
             newer: Some(target.clone()),
             ..Default::default()
         };
-        let lock = ops::resolve_lock_with(&env, &manifest, Some(&old_lock), &lock_r, &keep)?;
+        let lock = ops::resolve_lock_with(
+            &env,
+            &project.root,
+            &manifest,
+            Some(&old_lock),
+            &lock_r,
+            &keep,
+        )?;
         (manifest.clone(), lock)
     };
 

@@ -242,6 +242,15 @@ impl Manifest {
                 unmanaged = package_list("unmanaged.packages", v)?;
             }
         }
+        if let Some(both) = unmanaged
+            .iter()
+            .find(|u| dependencies.iter().any(|(n, _)| n == *u))
+        {
+            return Err(invalid(
+                "unmanaged.packages",
+                format!("`{both}` is also in [dependencies]; list it in one place only"),
+            ));
+        }
 
         let mut scan_rules = Vec::new();
         if let Some(t) = table(&doc, "scan")? {
