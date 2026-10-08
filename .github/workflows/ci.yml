@@ -1,0 +1,96 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    # The tests that use the network and R, once a week (Monday 03:00 UTC).
+    - cron: "0 3 * * 1"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  GITHUB_PAT: ${{ secrets.GITHUB_TOKEN }}
+
+jobs:
+  rust:
+    name: Rust (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    # Windows and macOS are not supported yet (roadmap steps for them are in progress); their
+    # results are shown but do not fail the run.
+    continue-on-error: ${{ matrix.os != 'ubuntu-24.04' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - if: runner.os == 'Linux'
+        run: cargo fmt --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test
+
+  rpkg:
+    name: R package (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: r-lib/actions/setup-r@v2
+        with:
+          use-public-rspm: true
+      # On Linux, also run the tests that call the rok binary.
+      - if: runner.os == 'Linux'
+        uses: dtolnay/rust-toolchain@stable
+      - if: runner.os == 'Linux'
+        uses: Swatinem/rust-cache@v2
+      - if: runner.os == 'Linux'
+        run: |
+          cargo build --release
+          echo "ROK_TEST_BINARY=$PWD/target/release/rok" >> "$GITHUB_ENV"
+      - name: R CMD check
+        shell: bash
+        run: |
+          R CMD build rpkg
+          R CMD check --as-cran --no-manual rok_*.tar.gz
+          # R CMD check fails only on errors; fail on warnings too.
+          ! grep -E '^Status: .*(ERROR|WARNING)' rok.Rcheck/00check.log
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rcheck-${{ matrix.os }}
+          path: rok.Rcheck/
+
+  renv-roundtrip:
+    name: renv round trip
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: r-lib/actions/setup-r@v2
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release
+      - run: .github/scripts/renv-roundtrip.sh target/release/rok
+
+  network:
+    name: Tests with the network and R
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: r-lib/actions/setup-r@v2
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test -- --ignored
