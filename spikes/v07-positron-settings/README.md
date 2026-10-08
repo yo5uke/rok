@@ -143,7 +143,14 @@ Windows では、管理者権限なしにファイルへのシンボリックリ
 | 4 | `positron.r.customRootFolders`：`%LOCALAPPDATA%\Programs\R` の絶対パス |
 | 5 | `positron.r.customRootFolders`：`~/AppData/Local/Programs/R`（`~` のまま） |
 
+| 6 | `positron.r.interpreters.default`：`.rok\R\bin\x64\R.exe` の絶対パス |
+| 7 | `positron.r.interpreters.default`：R 4.5 の絶対パス |
+| 8 | `positron.r.interpreters.default`：`~/AppData/Local/Programs/R/R-4.5.x/bin/x64/R.exe` |
+| 9 | `positron.r.interpreters.default`：`${workspaceFolder}/.rok/R/bin/x64/R.exe` |
+
 確かめ方（Reload Window、インタープリターの一覧、`source("v07-probe.R")`）とワークスペースの信頼の確認は、上の手順 1〜3 と同じです。
+
+画面の操作なしに確かめるには、`pwsh -File positron-log-check.ps1` を実行します。候補ごとに、別の設定フォルダで Positron を起動し、R 拡張のログから、見つかった R・設定の扱い・開いた直後に起動した R を `out\v07-positron-log.txt` に書きます（結果は RESULT.md）。
 
 ### 後片付け（Windows）
 

@@ -89,3 +89,5 @@ V7 の「Windows の場合」の準備（`prepare-windows.ps1`）を済ませて
 - **B の状態の切り替え**は、PowerShell で `pwsh -File v08-scenario.ps1 light`（`light`・`heavy`・`ask`・`reset`）を実行します
 - **RStudio for Windows** は、レジストリに登録された R を一覧に出します。rok が入れた R 4.5 は登録しないので、一覧に出ないはずです（出たかどうかを記録してください）。R 4.5 で試すときは、Tools > Global Options > General の「R version」で `%LOCALAPPDATA%\Programs\R\R-4.5.x` を選びます（RStudio の設定が変わるので、終わったら元に戻してください）。システムの R 4.6 のままでも、A（再起動）と、B の 5（R の版が違うときの案内）は確かめられます
 - **Windows の R のコンソール**の文字コードや記号（✔ ! ℹ ✖ •）の表示も見てください
+- **A（再起動）は、画面の操作なしでも確かめられます**：`pwsh -File ide-auto.ps1`。Positron と RStudio を利用者の設定とは別の場所で起動し、セッション開始のフックから `.rs.api.restartSession()` で再起動を指示して、前後を `out\v08-auto.txt` に記録します（結果は RESULT.md）
+

@@ -78,6 +78,13 @@ Write-Variant 2 '{ "positron.r.customBinaries": [".rok/R/bin/R.exe"] }'
 Write-Variant 3 '{ "positron.r.customBinaries": ["${workspaceFolder}/.rok/R/bin/R.exe"] }'
 Write-Variant 4 "{ `"positron.r.customRootFolders`": [`"$root`"] }"
 Write-Variant 5 '{ "positron.r.customRootFolders": ["~/AppData/Local/Programs/R"] }'
+# 既定の R（positron.r.interpreters.default）の候補
+$real = ("$r45\bin\x64\R.exe" -replace '\\', '/')
+$tilde = "~/AppData/Local/Programs/R/" + (Split-Path $r45 -Leaf) + "/bin/x64/R.exe"
+Write-Variant 6 "{ `"positron.r.interpreters.default`": `"$($abs -replace 'bin/R\.exe$', 'bin/x64/R.exe')`" }"
+Write-Variant 7 "{ `"positron.r.interpreters.default`": `"$real`" }"
+Write-Variant 8 "{ `"positron.r.interpreters.default`": `"$tilde`" }"
+Write-Variant 9 '{ "positron.r.interpreters.default": "${workspaceFolder}/.rok/R/bin/x64/R.exe" }'
 & "$Project\v07-variant.ps1" 0 | Out-Null
 
 ""
