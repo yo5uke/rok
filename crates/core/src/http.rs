@@ -13,9 +13,11 @@ const MAX_DOWNLOAD: u64 = 4 * 1024 * 1024 * 1024;
 
 #[derive(Debug, thiserror::Error)]
 pub enum HttpError {
-    #[error("{url}: HTTP {status}")]
+    #[error("Could not get {url} (HTTP {status}).")]
     Status { url: String, status: u16 },
-    #[error("{url}: {source}")]
+    #[error(
+        "Could not reach {url}: {source}\nCheck the network connection, and HTTPS_PROXY if you use a proxy."
+    )]
     Transport {
         url: String,
         #[source]

@@ -140,12 +140,6 @@ enum Command {
         #[arg(value_name = "PACKAGE")]
         package: String,
     },
-    /// Manage rok itself.
-    #[command(name = "self")]
-    SelfCmd {
-        #[command(subcommand)]
-        command: SelfCommand,
-    },
     /// Show the dependency tree.
     Tree {
         /// Show only this package's dependencies.
@@ -154,6 +148,12 @@ enum Command {
         /// How many levels to show.
         #[arg(long, value_name = "N")]
         depth: Option<usize>,
+    },
+    /// Manage rok itself.
+    #[command(name = "self")]
+    SelfCmd {
+        #[command(subcommand)]
+        command: SelfCommand,
     },
 }
 
@@ -288,7 +288,11 @@ fn main() -> ExitCode {
         Err(e) => {
             let mut msg = e.to_string();
             for cause in e.chain().skip(1) {
-                msg.push_str(&format!("\n{cause}"));
+                // Messages such as "<path>: <cause>" already show their cause.
+                let cause = cause.to_string();
+                if !msg.contains(&cause) {
+                    msg.push_str(&format!("\n{cause}"));
+                }
             }
             ui.error(&msg);
             ExitCode::FAILURE

@@ -93,10 +93,11 @@ fn replace(work: &Path, archive_bytes: &[u8], exe: &Path, version: &Version) -> 
             work.parent().unwrap_or(work).display()
         )
     })?;
-    archive::unpack(archive_bytes, work).map_err(|e| anyhow::anyhow!("cannot unpack rok: {e}"))?;
+    archive::unpack(archive_bytes, work)
+        .map_err(|e| anyhow::anyhow!("Cannot unpack the downloaded rok: {e}."))?;
     let new = work.join(rdetect::exe_name("rok"));
     if !new.is_file() {
-        bail!("the release has no {}", rdetect::exe_name("rok"));
+        bail!("The release has no {}.", rdetect::exe_name("rok"));
     }
     #[cfg(unix)]
     {
@@ -107,7 +108,7 @@ fn replace(work: &Path, archive_bytes: &[u8], exe: &Path, version: &Version) -> 
     let reported = String::from_utf8_lossy(&out.stdout);
     if reported.trim() != format!("rok {version}") {
         bail!(
-            "the downloaded binary reports `{}`, not rok {version}",
+            "The downloaded binary reports `{}`, not rok {version}.",
             reported.trim()
         );
     }

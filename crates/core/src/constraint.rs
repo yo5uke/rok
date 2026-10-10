@@ -70,7 +70,7 @@ pub struct Constraint {
 /// Error returned when a constraint cannot be parsed.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error(
-    "invalid version constraint `{0}`: expected `*`, a version such as `0.12.1`, or clauses such as `>= 1.0, < 2.0`"
+    "Invalid version constraint `{0}`.\nUse `*`, a version such as `0.12.1`, or clauses such as `>= 1.0, < 2.0`."
 )]
 pub struct ParseConstraintError(pub String);
 

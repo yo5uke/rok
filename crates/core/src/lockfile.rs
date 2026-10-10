@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 use serde::Deserialize;
 
 use crate::constraint::Constraint;
-use crate::manifest::{GitRef, parse_github};
+use crate::manifest::{GitRef, parse_github, toml_error};
 use crate::version::Version;
 
 /// File name of the lockfile.
@@ -135,10 +135,10 @@ impl Source {
 /// Error returned for an invalid lockfile.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum LockfileError {
-    #[error("rok.lock is not valid: {0}")]
+    #[error("rok.lock is not valid TOML at {0}.")]
     Syntax(String),
     #[error(
-        "rok.lock was written by a newer version of rok (lockfile version {0}); update rok to read it"
+        "rok.lock was written by a newer version of rok (lockfile version {0}).\nUpdate rok with `rok self update` to read it."
     )]
     TooNew(u32),
     #[error("rok.lock: {0}")]
@@ -322,14 +322,14 @@ impl Lockfile {
         // instead of an "unknown field" error.
         let table: toml::Table = text
             .parse()
-            .map_err(|e: toml::de::Error| LockfileError::Syntax(e.message().to_string()))?;
+            .map_err(|e: toml::de::Error| LockfileError::Syntax(toml_error(text, &e)))?;
         if let Some(v) = table.get("version").and_then(|v| v.as_integer())
             && v > i64::from(FORMAT_VERSION)
         {
             return Err(LockfileError::TooNew(u32::try_from(v).unwrap_or(u32::MAX)));
         }
         let raw: RawLockfile =
-            toml::from_str(text).map_err(|e| LockfileError::Syntax(e.message().to_string()))?;
+            toml::from_str(text).map_err(|e| LockfileError::Syntax(toml_error(text, &e)))?;
         if raw.version != FORMAT_VERSION {
             return Err(LockfileError::Invalid(format!(
                 "unsupported lockfile version {}",

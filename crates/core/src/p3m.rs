@@ -61,7 +61,7 @@ pub enum P3mError {
         #[source]
         source: std::io::Error,
     },
-    #[error("unexpected response from {url}: {message}")]
+    #[error("Unexpected response from {url}: {message}.")]
     Response { url: String, message: String },
     #[error(transparent)]
     Snapshot(#[from] SnapshotError),
@@ -77,13 +77,13 @@ fn io_err(path: &Path) -> impl FnOnce(std::io::Error) -> P3mError + '_ {
 /// Why a snapshot date could not be resolved.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum SnapshotError {
-    #[error("`{0}` is not a date; use the form YYYY-MM-DD")]
+    #[error("`{0}` is not a date.\nUse the form YYYY-MM-DD.")]
     InvalidDate(String),
-    #[error("{requested} is in the future (today is {today})")]
+    #[error("{requested} is in the future (today is {today}).")]
     InFuture { requested: String, today: String },
-    #[error("{requested} is before the first P3M snapshot ({first})")]
+    #[error("{requested} is before the first P3M snapshot ({first}).")]
     BeforeFirst { requested: String, first: String },
-    #[error("P3M lists no snapshot dates")]
+    #[error("P3M lists no snapshot dates.")]
     NoSnapshots,
 }
 

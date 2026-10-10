@@ -26,7 +26,7 @@ pub enum RepoError {
         #[source]
         source: std::io::Error,
     },
-    #[error("{url}: not a gzip-compressed PACKAGES file")]
+    #[error("{url} is not a gzip-compressed PACKAGES file.")]
     BadIndex { url: String },
 }
 

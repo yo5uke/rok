@@ -14,19 +14,21 @@ const API: &str = "https://api.github.com";
 pub enum GitHubError {
     #[error(transparent)]
     Http(#[from] HttpError),
-    #[error("{owner}/{repo}: cannot find `{reference}` (not a tag, a branch or a commit)")]
+    #[error("{owner}/{repo} has no tag, branch or commit `{reference}`.")]
     UnknownRef {
         owner: String,
         repo: String,
         reference: String,
     },
-    #[error("{owner}/{repo}: not found, or private (set GITHUB_PAT to a token that can read it)")]
+    #[error(
+        "{owner}/{repo} was not found on GitHub, or it is private.\nFor a private repository, set GITHUB_PAT to a token that can read it."
+    )]
     NotFound { owner: String, repo: String },
     #[error(
-        "{owner}/{repo}: GitHub's API rate limit was reached; set GITHUB_PAT to a token to raise it"
+        "{owner}/{repo}: GitHub's API rate limit was reached.\nSet GITHUB_PAT to a token to raise the limit."
     )]
     RateLimited { owner: String, repo: String },
-    #[error("unexpected response from {url}: {message}")]
+    #[error("Unexpected response from {url}: {message}.")]
     Response { url: String, message: String },
 }
 

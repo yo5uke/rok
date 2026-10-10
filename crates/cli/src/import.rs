@@ -57,7 +57,7 @@ pub fn import_renv(
     }
     let path = file.unwrap_or_else(|| dir.join(renv::FILE_NAME));
     let text = std::fs::read_to_string(&path)
-        .map_err(|e| anyhow::anyhow!("cannot read {}: {e}", path.display()))?;
+        .map_err(|e| anyhow::anyhow!("Cannot read {}: {e}", path.display()))?;
     let renv = RenvLock::parse(&text)?;
     let env = Env::from_env()?;
     let packages: Vec<&RenvPackage> = renv.packages.iter().filter(|p| p.name != "renv").collect();

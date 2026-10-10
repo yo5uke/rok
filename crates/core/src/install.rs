@@ -47,7 +47,7 @@ pub enum InstallError {
         #[source]
         source: std::io::Error,
     },
-    #[error("{name} {version} is not in the {date} snapshot")]
+    #[error("{name} {version} is not in the {date} snapshot.")]
     NotInSnapshot {
         name: String,
         version: Version,
@@ -55,7 +55,7 @@ pub enum InstallError {
     },
     #[error(transparent)]
     ChecksumMismatch(Box<Mismatch>),
-    #[error("{name} {version}: the source is not available from {from}")]
+    #[error("{name} {version}: the source is not available from {from}.")]
     SourceUnavailable {
         name: String,
         version: Version,
@@ -68,7 +68,7 @@ pub enum InstallError {
 /// A download whose checksum is not the expected one.
 #[derive(Debug, thiserror::Error)]
 #[error(
-    "{name} {version}: the downloaded file's {algorithm} is {actual}, not the expected {expected}"
+    "{name} {version}: the downloaded file's {algorithm} is {actual}, not the expected {expected}."
 )]
 pub struct Mismatch {
     pub name: String,
@@ -80,7 +80,7 @@ pub struct Mismatch {
 
 /// A package that failed to build from source.
 #[derive(Debug, thiserror::Error)]
-#[error("failed to build {name} {version} from source{}; see {}", hint.as_ref().map(|h| format!(" ({h})")).unwrap_or_default(), log.display())]
+#[error("Failed to build {name} {version} from source{}.\nThe log is in {}.", hint.as_ref().map(|h| format!(" ({h})")).unwrap_or_default(), log.display())]
 pub struct BuildFailure {
     pub name: String,
     pub version: Version,

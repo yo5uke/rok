@@ -116,10 +116,22 @@ pub struct ScanRule {
 /// Error returned for an invalid manifest.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ManifestError {
-    #[error("rok.toml is not valid TOML: {0}")]
+    #[error("rok.toml is not valid TOML at {0}.")]
     Syntax(String),
     #[error("rok.toml: `{key}`: {message}")]
     Invalid { key: String, message: String },
+}
+
+/// A TOML syntax error as `line <n>: <message>`.
+pub(crate) fn toml_error(text: &str, e: &toml::de::Error) -> String {
+    match e.span() {
+        Some(span) => format!(
+            "line {}: {}",
+            text[..span.start.min(text.len())].matches('\n').count() + 1,
+            e.message()
+        ),
+        None => e.message().to_string(),
+    }
 }
 
 fn invalid(key: impl Into<String>, message: impl Into<String>) -> ManifestError {
@@ -133,7 +145,7 @@ impl Manifest {
     pub fn parse(text: &str) -> Result<Self, ManifestError> {
         let doc: toml::Table = text
             .parse()
-            .map_err(|e: toml::de::Error| ManifestError::Syntax(e.message().to_string()))?;
+            .map_err(|e: toml::de::Error| ManifestError::Syntax(toml_error(text, &e)))?;
         check_keys(
             &doc,
             "",
@@ -827,7 +839,7 @@ suggest = ["officer", "flextable"]
     #[test]
     fn validates_dependency_tables() {
         let err = |deps: &str| parse_err(&with_deps(deps));
-        assert!(err("x = \">= one\"").contains("`dependencies.x`: invalid version constraint"));
+        assert!(err("x = \">= one\"").contains("`dependencies.x`: Invalid version constraint"));
         assert!(
             err("x = { repo = \"mv\", github = \"a/b\" }").contains("either `repo` or `github`")
         );

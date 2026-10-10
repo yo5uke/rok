@@ -315,8 +315,9 @@ pub fn check(inputs: &Inputs) -> Vec<Problem> {
                     .map(|(name, why)| format!("{name} ({why})"))
                     .collect(),
                 fix: Some(format!(
-                    "Run `rok add {}` to declare them.",
-                    names.join(" ")
+                    "Run `rok add {}` to declare {}.",
+                    names.join(" "),
+                    if names.len() == 1 { "it" } else { "them" }
                 )),
             });
         }
@@ -332,7 +333,12 @@ pub fn check(inputs: &Inputs) -> Vec<Problem> {
                 ),
                 details: f.unused.clone(),
                 fix: Some(format!(
-                    "If they are not needed, run `rok remove {}`.",
+                    "If {} not needed, run `rok remove {}`.",
+                    if f.unused.len() == 1 {
+                        "it is"
+                    } else {
+                        "they are"
+                    },
                     f.unused.join(" ")
                 )),
             });
@@ -433,10 +439,12 @@ pub fn check(inputs: &Inputs) -> Vec<Problem> {
                 ops::plural(outside.len()),
                 if outside.len() == 1 { "is" } else { "are" }
             ),
+            fix: Some(if outside.len() == 1 {
+                "Add it with `rok add`, or list it in [unmanaged] in rok.toml.".to_string()
+            } else {
+                "Add them with `rok add`, or list them in [unmanaged] in rok.toml.".to_string()
+            }),
             details: outside,
-            fix: Some(
-                "Add them with `rok add`, or list them in [unmanaged] in rok.toml.".to_string(),
-            ),
         });
     }
 
@@ -723,7 +731,7 @@ mod tests {
         assert_eq!(problems[0].details, ["sf (for geom_sf() in a.R:3)"]);
         assert_eq!(
             problems[0].fix.as_deref(),
-            Some("Run `rok add sf` to declare them.")
+            Some("Run `rok add sf` to declare it.")
         );
     }
 

@@ -22,7 +22,7 @@ pub enum CacheError {
         #[source]
         source: std::io::Error,
     },
-    #[error("{name} {version}: {reason}")]
+    #[error("{name} {version}: {reason}.")]
     BadPackage {
         name: String,
         version: String,

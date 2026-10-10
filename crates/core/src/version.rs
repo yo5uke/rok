@@ -24,9 +24,7 @@ pub struct Version {
 
 /// Error returned when a string is not a valid R version.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[error(
-    "invalid version `{0}`: expected numbers separated by `.` or `-`, such as `1.0` or `1.3-2`"
-)]
+#[error("Invalid version `{0}`.\nUse numbers separated by `.` or `-`, such as `1.0` or `1.3-2`.")]
 pub struct ParseVersionError(pub String);
 
 impl Version {

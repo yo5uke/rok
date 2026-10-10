@@ -26,7 +26,7 @@ const SEARCH_MONTHS: i64 = 24;
 #[derive(Debug, thiserror::Error)]
 pub enum PinError {
     #[error(
-        "stopped after {MAX_REQUESTS} requests to P3M; the search found no snapshot date where every package has a binary"
+        "Stopped after {MAX_REQUESTS} requests to P3M without finding a snapshot date where every package has a binary."
     )]
     Budget,
     #[error("{0}")]

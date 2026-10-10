@@ -34,21 +34,21 @@ pub enum RInstallError {
         #[source]
         source: std::io::Error,
     },
-    #[error("R {version} is already installed at {}", path.display())]
+    #[error("R {version} is already installed at {}.", path.display())]
     AlreadyInstalled { version: Version, path: PathBuf },
-    #[error("R {version} is not installed by rok (rok removes only the R versions it installed)")]
+    #[error("R {version} was not installed by rok, so rok does not remove it.")]
     NotManaged { version: Version },
-    #[error("no R release matches `{0}`; run `rok r list` to see the available versions")]
+    #[error("No R release matches `{0}`.\nRun `rok r list` to see the available versions.")]
     NoMatch(String),
-    #[error("`{0}` is not an R version; use the form 4.6, 4.6.1 or latest")]
+    #[error("`{0}` is not an R version.\nUse the form 4.6, 4.6.1 or latest.")]
     BadRequest(String),
     #[error("R {version} is not available for this machine:\n{reasons}")]
     Unavailable { version: Version, reasons: String },
-    #[error("installing R is not supported on {0} yet")]
+    #[error("Installing R is not supported on {0} yet.")]
     Unsupported(String),
-    #[error("the installed R {version} does not work: {message}")]
+    #[error("The installed R {version} does not work: {message}.")]
     Broken { version: Version, message: String },
-    #[error("unexpected response from {url}: {message}")]
+    #[error("Unexpected response from {url}: {message}.")]
     Response { url: String, message: String },
 }
 

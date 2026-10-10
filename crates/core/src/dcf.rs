@@ -92,7 +92,7 @@ pub struct Dependency {
 
 /// Error returned for a malformed dependency field.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[error("invalid dependency `{0}`")]
+#[error("Invalid dependency `{0}`.")]
 pub struct ParseDependencyError(pub String);
 
 /// Parses a field such as `R (>= 3.5.0), stats, Rcpp (>= 1.0.5)`.

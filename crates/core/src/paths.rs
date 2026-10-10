@@ -36,9 +36,9 @@ pub struct UserDirs {
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum PathsError {
-    #[error("cannot find the home directory; set ROK_DATA_DIR and ROK_CACHE_DIR")]
+    #[error("Cannot find the home directory.\nSet ROK_DATA_DIR and ROK_CACHE_DIR.")]
     NoHome,
-    #[error("the environment variable {0} is not set; set ROK_DATA_DIR and ROK_CACHE_DIR")]
+    #[error("The environment variable {0} is not set.\nSet ROK_DATA_DIR and ROK_CACHE_DIR.")]
     MissingVar(&'static str),
 }
 
