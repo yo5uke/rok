@@ -114,7 +114,7 @@ local({
       }
     } else {
       message("! This project uses rok to manage its packages, but rok is not installed.\n",
-              "i Install it with `install.packages(\"rok\")`, then restart R.")
+              "\u2139 Install it with `install.packages(\"rok\")`, then restart R.")
     }
   }
   if (!is.na(bin)) {
