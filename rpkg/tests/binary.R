@@ -47,6 +47,11 @@ if (nzchar(bin) && file.exists(bin)) {
   res <- rok:::rok_call(c("r", "list"))
   stopifnot(identical(res$command, "r list"))
 
+  # In the background (interactive sessions), the binary reports its exit status as an event.
+  out <- tempfile()
+  status <- suppressMessages(rok:::run_watched(paths$binary, c("r", "list", "--json"), out))
+  stopifnot(identical(status, 0L), grepl('"r list"', paste(readLines(out), collapse = "")))
+
   do.call(Sys.setenv, as.list(old))
   unlink(home, recursive = TRUE)
 }
@@ -64,4 +69,50 @@ if (nzchar(bin) && file.exists(bin) && .Platform$OS.type == "unix") {
   # Outside a project the command fails; what matters is that no shell ran `echo`.
   stopifnot(is.character(res), !file.exists("0.13"))
   unlink(home, recursive = TRUE)
+}
+
+# run_watched() relays messages, draws the progress line, and returns the exit status the
+# program reports; a program that stops without reporting it has failed.
+if (.Platform$OS.type == "unix") {
+  fake <- function(lines) {
+    path <- tempfile()
+    # The events file is the last argument.
+    writeLines(c(
+      "#!/bin/sh", "for ev; do :; done", "printf '\\001pid %s\\n' $$ >> \"$ev\"", lines
+    ), path)
+    Sys.chmod(path, "755")
+    path
+  }
+  watch <- function(program) {
+    out <- tempfile()
+    shown <- character()
+    status <- withCallingHandlers(
+      rok:::run_watched(program, character(), out),
+      message = function(m) {
+        shown <<- c(shown, conditionMessage(m))
+        invokeRestart("muffleMessage")
+      }
+    )
+    list(status = status, shown = shown, out = readLines(out))
+  }
+
+  ok <- watch(fake(c(
+    "printf '\\001progress   Downloading 2 packages 1/2\\n' >> \"$ev\"",
+    "printf '\\001progress \\n' >> \"$ev\"",
+    "echo '  Downloaded 2 packages' >> \"$ev\"",
+    "echo '{}'",
+    "printf '\\001exit 0\\n' >> \"$ev\""
+  )))
+  stopifnot(
+    identical(ok$status, 0L),
+    identical(ok$out, "{}"),
+    "\r  Downloading 2 packages 1/2" %in% ok$shown,
+    "  Downloaded 2 packages\n" %in% ok$shown
+  )
+
+  needs <- watch(fake("printf '\\001exit 2\\n' >> \"$ev\""))
+  stopifnot(identical(needs$status, 2L))
+
+  crashed <- watch(fake(c("echo 'boom' >&2", "kill -9 $$")))
+  stopifnot(identical(crashed$status, 1L), "boom\n" %in% crashed$shown)
 }

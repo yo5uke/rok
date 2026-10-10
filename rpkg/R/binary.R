@@ -96,18 +96,23 @@ check_version <- function(bin) {
   invisible(TRUE)
 }
 
-# Runs the binary with `args` and `--json`. Messages for people go straight to the console
-# (stderr); the JSON result on stdout is parsed and returned. When the binary needs an
-# answer (exit status 2 with a `needs` object), the question is asked here and the command
-# runs again with the answer.
+# Runs the binary with `args` and `--json`. Messages for people go to the console (stderr);
+# the JSON result on stdout is parsed and returned. When the binary needs an answer (exit
+# status 2 with a `needs` object), the question is asked here and the command runs again with
+# the answer. In an interactive session the binary runs in the background, so that its
+# progress can be drawn (see run_watched()).
 rok_call <- function(args) {
   bin <- rok_binary()
   answers <- character()
   repeat {
     out <- tempfile("rok-")
-    # system2() quotes the command but passes the arguments to the shell as they are: quote
-    # them (`< 0.13`, paths with spaces).
-    status <- system2(bin, shQuote(c(args, "--json", answers)), stdout = out, stderr = "")
+    status <- if (interactive()) {
+      run_watched(bin, c(args, "--json", answers), out)
+    } else {
+      # system2() quotes the command but passes the arguments to the shell as they are: quote
+      # them (`< 0.13`, paths with spaces).
+      system2(bin, shQuote(c(args, "--json", answers)), stdout = out, stderr = "")
+    }
     text <- if (file.exists(out)) readLines(out, warn = FALSE, encoding = "UTF-8") else character()
     unlink(out)
     result <- if (length(text)) parse_json(paste(text, collapse = "\n")) else NULL
@@ -119,6 +124,114 @@ rok_call <- function(args) {
       stop("rok could not complete the command (see the messages above).", call. = FALSE)
     }
     return(result)
+  }
+}
+
+# Runs the binary in the background with `--events <file>`, writing stdout to `out`, and
+# relays what it writes to that file: messages as they come, and the progress line, drawn here
+# with `\r`. (Waiting in system2() would hold the progress back: in RStudio and Positron on
+# Windows, R shows a program's output only line by line. And on Windows, R cannot read a file
+# that system2() redirects output to until the program exits, so the binary writes the events
+# file itself.) Returns the exit status. If R is interrupted, the binary is stopped too.
+run_watched <- function(bin, args, out) {
+  events <- tempfile("rok-")
+  err <- tempfile("rok-")
+  file.create(events)
+  con <- NULL
+  pid <- NA_integer_
+  status <- NA_integer_
+  ended <- FALSE
+  shown <- 0L
+  on.exit({
+    if (shown > 0L) message("\r", strrep(" ", shown), "\r", appendLF = FALSE)
+    if (!ended && !is.na(pid)) tools::pskill(pid)
+    if (!is.null(con)) close(con)
+    unlink(c(events, err))
+  })
+  system2(bin, shQuote(c(args, "--events", events)), stdout = out, stderr = err, wait = FALSE)
+  con <- file(events, open = "r", blocking = FALSE, encoding = "UTF-8")
+  started <- checked <- Sys.time()
+  repeat {
+    lines <- readLines(con, warn = FALSE)
+    for (line in lines) {
+      if (!startsWith(line, "\001")) {
+        if (shown > 0L) {
+          message("\r", strrep(" ", shown), "\r", appendLF = FALSE)
+          shown <- 0L
+        }
+        message(line)
+        next
+      }
+      kind <- sub("^\001(\\S+).*$", "\\1", line)
+      value <- sub("^\001\\S+ ?", "", line)
+      if (kind == "pid") {
+        pid <- as.integer(value)
+      } else if (kind == "exit") {
+        status <- as.integer(value)
+      } else if (kind == "progress") {
+        # An empty line clears the progress.
+        message("\r", value, strrep(" ", max(0L, shown - nchar(value))),
+          if (!nzchar(value)) "\r", appendLF = FALSE)
+        shown <- nchar(value)
+      }
+    }
+    if (!is.na(status)) break
+    if (ended) {
+      # The binary stopped without saying how (it crashed or was killed, or never started):
+      # show what it wrote to stderr.
+      for (line in readable_lines(err)) message(line)
+      status <- 1L
+      break
+    }
+    if (!length(lines)) {
+      if (is.na(pid) && difftime(Sys.time(), started, units = "secs") > 10) {
+        ended <- TRUE
+        next
+      }
+      if (!is.na(pid) && difftime(Sys.time(), checked, units = "secs") > 1) {
+        checked <- Sys.time()
+        # Read once more: the last lines may have come just before it stopped.
+        if (!process_alive(pid)) ended <- TRUE
+        next
+      }
+      Sys.sleep(0.05)
+    }
+  }
+  ended <- TRUE
+  # The binary reported its exit status just before exiting; on Windows, its output can be
+  # read only once it has.
+  for (i in 1:250) {
+    if (readable(out)) break
+    Sys.sleep(0.02)
+  }
+  status
+}
+
+# Whether the file `path` can be opened for reading.
+readable <- function(path) {
+  con <- suppressWarnings(tryCatch(file(path, open = "r"), error = function(e) NULL))
+  if (is.null(con)) return(FALSE)
+  close(con)
+  TRUE
+}
+
+# The lines of `path`, or none if it cannot be read.
+readable_lines <- function(path) {
+  if (!readable(path)) return(character())
+  readLines(path, warn = FALSE, encoding = "UTF-8")
+}
+
+# Whether the process `pid` is running.
+process_alive <- function(pid) {
+  if (.Platform$OS.type == "windows") {
+    out <- suppressWarnings(system2("tasklist",
+      c("/FI", shQuote(paste("PID eq", pid)), "/NH", "/FO", "CSV"),
+      stdout = TRUE, stderr = FALSE
+    ))
+    # tasklist answers in the system's code page: compare bytes (the pid is ASCII).
+    any(grepl(paste0('","', pid, '","'), out, fixed = TRUE, useBytes = TRUE))
+  } else {
+    tools::pskill(pid, 0L)
   }
 }
 
