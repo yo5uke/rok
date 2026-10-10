@@ -104,7 +104,9 @@ local({
   if (is.na(bin) && interactive()) {
     # A collaborator without rok: offer to install it (one question), then sync.
     if (nzchar(system.file(package = "rok"))) {
-      if (isTRUE(utils::askYesNo("This project uses rok, whose engine is not installed. Install it now?"))) {
+      # Prompts given: the askYesNo option can be a Windows dialog that opens behind Positron.
+      if (isTRUE(utils::askYesNo("This project uses rok, whose engine is not installed. Install it now?",
+                                 prompts = c("Yes", "No", "Cancel")))) {
         op <- options(rok.yes = TRUE)
         ok <- tryCatch({ rok::setup(); TRUE }, error = function(e) { message(conditionMessage(e)); FALSE })
         options(op)

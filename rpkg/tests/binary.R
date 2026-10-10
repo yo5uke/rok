@@ -17,6 +17,17 @@ stopifnot(
   identical(rok:::opt("--depth", 2), c("--depth", "2"))
 )
 
+# Questions are asked in the console even when the askYesNo option is a dialog (as in Positron
+# on Windows). Without a console to answer, the default is taken.
+local({
+  op <- options(askYesNo = function(...) stop("the askYesNo option was used"))
+  on.exit(options(op))
+  stopifnot(
+    isTRUE(rok:::ask_yes_no("Continue?")),
+    identical(rok:::ask_yes_no("Continue?", default = FALSE), FALSE)
+  )
+})
+
 bin <- Sys.getenv("ROK_TEST_BINARY")
 if (nzchar(bin) && file.exists(bin)) {
   home <- tempfile("rok-test-")

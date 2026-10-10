@@ -32,11 +32,11 @@ consent <- function(question) {
   if (isTRUE(getOption("rok.yes"))) return(TRUE)
   if (!interactive()) {
     stop(question, "\n",
-      "i Run `rok::setup()` in an interactive session, or set `options(rok.yes = TRUE)`.",
+      "\u2139 Run `rok::setup()` in an interactive session, or set `options(rok.yes = TRUE)`.",
       call. = FALSE
     )
   }
-  isTRUE(utils::askYesNo(question, default = TRUE))
+  isTRUE(ask_yes_no(question, default = TRUE))
 }
 
 #' Install the rok binary
@@ -86,7 +86,7 @@ setup <- function(binary = NULL) {
   the$binary <- NULL
 
   place_package(lib)
-  message("\u2714 Installed rok ", version, " in ", dirname(dest))
+  message("\u2714 Installed rok ", version, " in ", dirname(dest), ".")
   invisible(list(binary = dest, library = lib))
 }
 

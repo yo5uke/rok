@@ -40,7 +40,7 @@ rok_binary <- function() {
   if (!length(candidates)) {
     stop(
       "The rok binary is not installed.\n",
-      "i Run `rok::setup()` to install it.",
+      "\u2139 Run `rok::setup()` to install it.",
       call. = FALSE
     )
   }
@@ -78,16 +78,16 @@ check_version <- function(bin) {
   wanted <- as.character(utils::packageVersion("rok"))
   if (is.na(found)) {
     stop("`", bin, "` is not a working rok binary.\n",
-      "i Run `rok::setup()` to install it again.",
+      "\u2139 Run `rok::setup()` to install it again.",
       call. = FALSE
     )
   }
   if (!identical(found, wanted)) {
     # A newer binary (after `rok self update`) asks for a newer package, not an older binary.
     fix <- if (utils::compareVersion(found, wanted) > 0) {
-      paste0("i Update the rok package to ", found, ", or run `rok::setup()` to go back to rok ", wanted, ".")
+      paste0("\u2139 Update the rok package to ", found, ", or run `rok::setup()` to go back to rok ", wanted, ".")
     } else {
-      "i Run `rok::setup()` to install the matching binary."
+      "\u2139 Run `rok::setup()` to install the matching binary."
     }
     stop("The rok binary is version ", found, ", but the R package is ", wanted, ".\n", fix,
       call. = FALSE
@@ -127,7 +127,7 @@ ask <- function(needs) {
   yes <- isTRUE(getOption("rok.yes"))
   if (!yes && !interactive()) {
     stop(needs$question, "\n",
-      "i This needs an answer. Run it in an interactive session, ",
+      "\u2139 This needs an answer. Run it in an interactive session, ",
       "or set `options(rok.yes = TRUE)` to answer yes to every question.",
       call. = FALSE
     )
@@ -139,9 +139,16 @@ ask <- function(needs) {
     if (pick == 0L) stop("Cancelled. Nothing was changed.", call. = FALSE)
     return(c(needs$flag, values[[pick]]))
   }
-  answer <- if (yes) TRUE else utils::askYesNo(needs$question, default = isTRUE(needs$default))
+  answer <- if (yes) TRUE else ask_yes_no(needs$question, default = isTRUE(needs$default))
   if (!isTRUE(answer)) stop("Cancelled. Nothing was changed.", call. = FALSE)
   c("--confirmed", needs$id)
+}
+
+# askYesNo() in the console: TRUE, FALSE or NA (cancelled). Giving the prompts keeps it from
+# using the askYesNo option, which R sets to a Windows dialog when it starts as Rgui. Positron
+# starts R that way on Windows, and the dialog opens behind its window: R seems to hang.
+ask_yes_no <- function(question, default = TRUE) {
+  utils::askYesNo(question, default = default, prompts = c("Yes", "No", "Cancel"))
 }
 
 # Arguments for an optional value: `--flag value`, or nothing.

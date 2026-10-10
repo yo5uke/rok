@@ -24,9 +24,9 @@ has published. If the rok binary is not installed yet, \code{\link[=setup]{setup
 \details{
 In an interactive session, R then switches to the project: in Positron or RStudio, R
 restarts (after asking if the global environment has objects), or the IDE opens the new
-project's folder; elsewhere, the project is activated in this session if no packages are
-loaded yet. In Positron, the project's R is also written to \code{.vscode/settings.json}, after
-asking.
+project's folder; elsewhere, if no packages are loaded yet, the session switches to the
+project (working directory and library), after asking. In Positron, the project's R is also
+written to \code{.vscode/settings.json}, after asking.
 }
 \examples{
 \dontshow{if (interactive() && rok_available()) withAutoprint(\{ # examplesIf}

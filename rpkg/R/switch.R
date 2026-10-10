@@ -13,6 +13,12 @@ after_init_action <- function(same, ide, loaded, same_r) {
   if (length(loaded)) "advise" else "activate"
 }
 
+# The objects a restart would clear. .Random.seed is not the person's work: Positron's help
+# server creates it in every session (tools::startDynamicHelp() draws a random port).
+global_objects <- function(env = globalenv()) {
+  setdiff(ls(env, all.names = TRUE), ".Random.seed")
+}
+
 running_ide <- function() {
   if (nzchar(Sys.getenv("POSITRON"))) "positron" else if (nzchar(Sys.getenv("RSTUDIO"))) "rstudio" else "none"
 }
@@ -37,35 +43,43 @@ switch_to_project <- function(root, r_version) {
   ide_name <- if (ide == "positron") "Positron" else "RStudio"
   switch(action,
     "switch-r" = message(
-      "i The project uses R ", r_version, ", but this is R ", getRversion(), ".\n",
+      "\u2139 The project uses R ", r_version, ", but this is R ", getRversion(), ".\n",
       "  Start R ", r_version, " in ", root,
       if (ide != "none") paste0(" (choose it in ", ide_name, ")"), " to use the project."
     ),
     restart = {
-      n <- length(ls(globalenv(), all.names = TRUE))
-      ok <- n == 0L || isTRUE(utils::askYesNo(paste0(
+      n <- length(global_objects())
+      ok <- n == 0L || isTRUE(ask_yes_no(paste0(
         "Restart R to start using the project? The ", n, " object", if (n != 1L) "s",
         " in the global environment will be cleared."
       ), default = FALSE))
       if (ok && ide_call(".rs.api.restartSession")) return(invisible())
-      message("i Restart R to start using the project.")
+      message("\u2139 Restart R to start using the project.")
     },
     open = {
-      ok <- isTRUE(utils::askYesNo(paste0("Open ", root, " in ", ide_name, " now?")))
+      ok <- isTRUE(ask_yes_no(paste0("Open ", root, " in ", ide_name, " now?")))
       opened <- ok && if (ide == "positron") {
         ide_call(".ps.ui.openWorkspace", root, FALSE)
       } else {
         ide_call(".rs.api.openProject", root)
       }
-      if (!opened) message("i Open ", root, " in ", ide_name, " to use the project.")
+      if (!opened) message("\u2139 Open ", root, " in ", ide_name, " to use the project.")
     },
     activate = {
+      # The working directory and the library paths change: only when asked.
+      ok <- isTRUE(ask_yes_no(paste0(
+        "Switch this R session to the project? The working directory becomes ", root, "."
+      )))
+      if (!ok) {
+        message("\u2139 Start R in ", root, " to use the project.")
+        return(invisible())
+      }
       setwd(root)
       source(file.path(root, ".rok", "activate.R"), local = new.env())
       message("\u2714 Switched to the project: the working directory is ", root, ".")
     },
     advise = message(
-      "i Packages are already loaded in this R session. Restart R in ", root,
+      "\u2139 Packages are already loaded in this R session. Restart R in ", root,
       " to use the project."
     )
   )

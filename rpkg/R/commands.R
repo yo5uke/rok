@@ -18,9 +18,9 @@ project_arg <- function(project) {
 #'
 #' In an interactive session, R then switches to the project: in Positron or RStudio, R
 #' restarts (after asking if the global environment has objects), or the IDE opens the new
-#' project's folder; elsewhere, the project is activated in this session if no packages are
-#' loaded yet. In Positron, the project's R is also written to `.vscode/settings.json`, after
-#' asking.
+#' project's folder; elsewhere, if no packages are loaded yet, the session switches to the
+#' project (working directory and library), after asking. In Positron, the project's R is also
+#' written to `.vscode/settings.json`, after asking.
 #'
 #' @param path The project directory (created if needed).
 #' @param r The R version, such as `"4.6"` or `"latest"` (default: the running R).

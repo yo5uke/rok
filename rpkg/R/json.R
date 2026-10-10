@@ -10,7 +10,7 @@ parse_json <- function(text) {
   pos <- 1L
 
   fail <- function(what) {
-    stop(sprintf("invalid JSON at character %d: %s", pos, what), call. = FALSE)
+    stop(sprintf("Invalid JSON at character %d: %s.", pos, what), call. = FALSE)
   }
   skip <- function() {
     while (pos <= n && chars[[pos]] %in% c(" ", "\t", "\n", "\r")) pos <<- pos + 1L
