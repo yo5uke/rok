@@ -255,7 +255,7 @@ pub fn activate(
     };
 
     let before = lock.clone();
-    let report = ops::execute_sync(&env, &plan, &library, &r, &|m| ui.step(m))?;
+    let report = ops::execute_sync(&env, &plan, &library, &r, &ui.transfers(), &|m| ui.step(m))?;
     ops::record_built_checksums(&mut lock, &report.built);
     ops::record_remotes(&mut lock, &report.paths);
     ops::record_rebuilt(&mut lock, &report.built);

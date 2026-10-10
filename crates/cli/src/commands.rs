@@ -138,7 +138,7 @@ pub(crate) fn sync_library(
         }
     }
     let library = project.library(&r.version.minor(), &env.platform);
-    let report = ops::execute_sync(env, &plan, &library, r, &|m| ui.step(m))?;
+    let report = ops::execute_sync(env, &plan, &library, r, &ui.transfers(), &|m| ui.step(m))?;
     ops::record_built_checksums(lock, &report.built);
     ops::record_remotes(lock, &report.paths);
     ops::record_rebuilt(lock, &report.built);

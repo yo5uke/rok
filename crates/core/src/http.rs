@@ -3,8 +3,11 @@
 //! A thin wrapper over a blocking `ureq` agent. Requests follow redirects (P3M redirects
 //! downloads to a CDN), honour the usual proxy variables, and return errors that name the URL.
 
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
+
+use crate::transfer::Transfers;
 
 /// Largest response body rok reads into memory (package indexes are a few MB).
 const MAX_BODY: u64 = 512 * 1024 * 1024;
@@ -98,14 +101,7 @@ impl Http {
         for (k, v) in headers {
             req = req.header(*k, *v);
         }
-        let mut resp = req.call().map_err(transport)?;
-        let status = resp.status().as_u16();
-        if !(200..300).contains(&status) {
-            return Err(HttpError::Status {
-                url: url.to_string(),
-                status,
-            });
-        }
+        let mut resp = Self::success(url, req.call())?;
         resp.body_mut()
             .with_config()
             .limit(MAX_BODY)
@@ -113,16 +109,65 @@ impl Http {
             .map_err(transport)
     }
 
-    /// GET `url` into the file `path` without holding the body in memory. Returns the size.
-    pub fn download(&self, url: &str, path: &Path) -> Result<u64, HttpError> {
-        let mut resp = self
-            .agent
-            .get(url)
-            .call()
-            .map_err(|source| HttpError::Transport {
+    /// GET `url` and return the body, reporting the progress to `transfers` as `name`.
+    pub fn get_tracked(
+        &self,
+        url: &str,
+        name: &str,
+        transfers: &dyn Transfers,
+    ) -> Result<Vec<u8>, HttpError> {
+        let mut resp = Self::success(url, self.agent.get(url).call())?;
+        transfers.start(name, resp.body().content_length());
+        let mut reader = Tracked {
+            inner: resp.body_mut().with_config().limit(MAX_BODY).reader(),
+            name,
+            transfers,
+        };
+        let mut body = Vec::new();
+        reader
+            .read_to_end(&mut body)
+            .map_err(|e| HttpError::Transport {
                 url: url.to_string(),
-                source: Box::new(source),
+                source: Box::new(e.into()),
             })?;
+        Ok(body)
+    }
+
+    /// GET `url` into the file `path` without holding the body in memory, reporting the
+    /// progress to `transfers` as `name`. Returns the size.
+    pub fn download(
+        &self,
+        url: &str,
+        path: &Path,
+        name: &str,
+        transfers: &dyn Transfers,
+    ) -> Result<u64, HttpError> {
+        let mut resp = Self::success(url, self.agent.get(url).call())?;
+        let io = |source| HttpError::Io {
+            path: path.to_path_buf(),
+            source,
+        };
+        let mut file = std::fs::File::create(path).map_err(io)?;
+        transfers.start(name, resp.body().content_length());
+        let mut reader = Tracked {
+            inner: resp.body_mut().with_config().limit(MAX_DOWNLOAD).reader(),
+            name,
+            transfers,
+        };
+        let size = std::io::copy(&mut reader, &mut file).map_err(io)?;
+        file.sync_all().map_err(io)?;
+        Ok(size)
+    }
+
+    /// The response, if the request went through and the status is a success.
+    fn success(
+        url: &str,
+        result: Result<ureq::http::Response<ureq::Body>, ureq::Error>,
+    ) -> Result<ureq::http::Response<ureq::Body>, HttpError> {
+        let resp = result.map_err(|source| HttpError::Transport {
+            url: url.to_string(),
+            source: Box::new(source),
+        })?;
         let status = resp.status().as_u16();
         if !(200..300).contains(&status) {
             return Err(HttpError::Status {
@@ -130,15 +175,7 @@ impl Http {
                 status,
             });
         }
-        let io = |source| HttpError::Io {
-            path: path.to_path_buf(),
-            source,
-        };
-        let mut file = std::fs::File::create(path).map_err(io)?;
-        let mut reader = resp.body_mut().with_config().limit(MAX_DOWNLOAD).reader();
-        let size = std::io::copy(&mut reader, &mut file).map_err(io)?;
-        file.sync_all().map_err(io)?;
-        Ok(size)
+        Ok(resp)
     }
 
     /// HEAD `url`. Any status is returned as a [`Head`]; only transport failures are errors.
@@ -178,5 +215,22 @@ impl Http {
             status: resp.status().as_u16(),
             headers,
         })
+    }
+}
+
+/// A reader that reports each chunk it reads.
+struct Tracked<'a, R> {
+    inner: R,
+    name: &'a str,
+    transfers: &'a dyn Transfers,
+}
+
+impl<R: Read> Read for Tracked<'_, R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let n = self.inner.read(buf)?;
+        if n > 0 {
+            self.transfers.advance(self.name, n as u64);
+        }
+        Ok(n)
     }
 }

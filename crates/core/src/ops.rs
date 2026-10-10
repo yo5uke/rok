@@ -22,6 +22,7 @@ use crate::resolve::{
 };
 use crate::scan;
 use crate::syslibs::{self, AptAdvice, SystemLibraries};
+use crate::transfer::{Group, Transfers};
 use crate::version::Version;
 
 #[derive(Debug, thiserror::Error)]
@@ -897,6 +898,7 @@ pub fn execute_sync(
     plan: &SyncPlan,
     library: &Path,
     r: &RInstallation,
+    transfers: &dyn Transfers,
     progress: &(dyn Fn(&str) + Sync),
 ) -> Result<SyncReport, OpError> {
     let ctx = env.context(r);
@@ -914,18 +916,16 @@ pub fn execute_sync(
         }
     }
     if !binaries.is_empty() {
-        progress(&format!(
-            "Downloading {} package{}",
-            binaries.len(),
-            plural(binaries.len())
-        ));
-        paths.extend(ctx.fetch_binaries(&binaries)?);
+        let what = format!("{} package{}", binaries.len(), plural(binaries.len()));
+        let group = Group::begin(transfers, &what, binaries.len());
+        paths.extend(ctx.fetch_binaries(&binaries, transfers)?);
+        group.complete();
     }
     let sources = plan.sources();
     let built = if sources.is_empty() {
         Vec::new()
     } else {
-        let built = ctx.build_sources(&sources, &paths, progress)?;
+        let built = ctx.build_sources(&sources, &paths, transfers, progress)?;
         paths.extend(built.iter().map(|b| (b.name.clone(), b.path.clone())));
         built
     };

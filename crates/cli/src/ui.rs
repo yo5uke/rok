@@ -3,18 +3,26 @@
 //! Messages follow the tidyverse style: a symbol, then one line stating what happened, then
 //! bullets with details. Colours are used only on a terminal and never when `NO_COLOR` is set.
 
+use std::fs::File;
 use std::io::{BufRead, IsTerminal, Write};
+use std::path::Path;
+use std::sync::Mutex;
 
 use rok_core::ops::Change;
 
+use crate::progress::{Mode, Progress};
+
 pub struct Ui {
     color: bool,
+    progress: Mode,
     /// Answer yes to every question (`--yes`).
     pub yes: bool,
     /// Also print structured results as JSON on stdout (`--json`).
     pub json: bool,
     /// Questions already answered yes, by id (`--confirmed`, used by the R package).
     confirmed: Vec<String>,
+    /// Where messages and events go instead of stderr (`--events`, used by the R package).
+    events: Option<Mutex<File>>,
 }
 
 /// A question that someone must answer, raised when rok runs for a program: with `--json` and
@@ -65,13 +73,57 @@ const CYAN: &str = "36";
 const BOLD_YELLOW: &str = "1;33";
 
 impl Ui {
-    pub fn new(yes: bool, json: bool, confirmed: Vec<String>) -> Ui {
+    /// With `events`, messages and events go to that file. (The R package reads it while rok
+    /// runs; on Windows, R cannot read a file it redirected stderr to until rok exits.)
+    pub fn new(
+        yes: bool,
+        json: bool,
+        confirmed: Vec<String>,
+        events: Option<&Path>,
+    ) -> std::io::Result<Ui> {
         let no_color = std::env::var_os("NO_COLOR").is_some_and(|v| !v.is_empty());
-        Ui {
-            color: std::io::stderr().is_terminal() && !no_color,
+        let events = events.map(File::create).transpose()?.map(Mutex::new);
+        Ok(Ui {
+            color: events.is_none() && std::io::stderr().is_terminal() && !no_color,
+            progress: if events.is_some() {
+                Mode::Events
+            } else {
+                Mode::detect()
+            },
             yes,
             json,
             confirmed,
+            events,
+        })
+    }
+
+    pub fn color(&self) -> bool {
+        self.color
+    }
+
+    /// Shows the progress of downloads on stderr.
+    pub fn transfers(&self) -> Progress<'_> {
+        Progress::new(self, self.progress)
+    }
+
+    /// An event for the R package (`--events`): a line that starts with \x01.
+    pub fn event(&self, kind: &str, value: &str) {
+        self.line(&format!("\x01{kind} {value}"));
+    }
+
+    /// Writes `s` as it is: to stderr, or to the events file.
+    pub fn write_raw(&self, s: &str) {
+        match &self.events {
+            Some(file) => {
+                let mut file = file.lock().unwrap_or_else(|e| e.into_inner());
+                let _ = file.write_all(s.as_bytes());
+                let _ = file.flush();
+            }
+            None => {
+                let mut err = std::io::stderr().lock();
+                let _ = err.write_all(s.as_bytes());
+                let _ = err.flush();
+            }
         }
     }
 
@@ -84,7 +136,7 @@ impl Ui {
     }
 
     fn line(&self, s: &str) {
-        let _ = writeln!(std::io::stderr(), "{s}");
+        self.write_raw(&format!("{s}\n"));
     }
 
     /// A line without a symbol.

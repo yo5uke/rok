@@ -24,6 +24,7 @@ use crate::platform::{Arch, Os, Platform};
 use crate::rdetect::RInstallation;
 use crate::repo::{self, RepoError, Repositories};
 use crate::resolve::Origin;
+use crate::transfer::{Group, Transfers};
 use crate::version::Version;
 
 /// The CRAN mirror used for source packages.
@@ -402,18 +403,20 @@ impl Context<'_> {
     pub fn fetch_binaries(
         &self,
         items: &[(&Wanted, &str, &str, Option<&Checksum>)],
+        transfers: &dyn Transfers,
     ) -> Result<Vec<(String, PathBuf)>, InstallError> {
         let results = par::map(
             items,
             self.jobs,
             |(w, url, key, checksum)| -> Result<(String, PathBuf), InstallError> {
-                let mut bytes = self.http.get_bytes(url, None)?;
+                let mut bytes = self.http.get_tracked(url, &w.name, transfers)?;
                 // P3M's index and files can briefly disagree (V2): try once more.
                 if check_checksum(w, &bytes, *checksum).is_err() {
-                    bytes = self.http.get_bytes(url, None)?;
+                    bytes = self.http.get_tracked(url, &w.name, transfers)?;
                 }
                 check_checksum(w, &bytes, *checksum)?;
                 let path = self.cache.insert_binary(&w.name, &w.version, key, &bytes)?;
+                transfers.finish(&w.name);
                 Ok((w.name.clone(), path))
             },
         );
@@ -426,16 +429,28 @@ impl Context<'_> {
         &self,
         items: &[&Wanted],
         available: &HashMap<String, PathBuf>,
+        transfers: &dyn Transfers,
         progress: &(dyn Fn(&str) + Sync),
     ) -> Result<Vec<Built>, InstallError> {
         let tmp = self.cache.temp_dir()?;
-        let sources = par::map(items, self.jobs, |w| self.download_source(w, tmp.path()));
+        let what = format!(
+            "{} source package{}",
+            items.len(),
+            if items.len() == 1 { "" } else { "s" }
+        );
+        let group = Group::begin(transfers, &what, items.len());
+        let sources = par::map(items, self.jobs, |w| {
+            let fetched = self.download_source(w, tmp.path(), transfers)?;
+            transfers.finish(&w.name);
+            Ok(fetched)
+        });
         let mut sources: HashMap<&str, Fetched> = items
             .iter()
             .map(|w| w.name.as_str())
             .zip(sources)
-            .map(|(n, r)| r.map(|t| (n, t)))
+            .map(|(n, r): (_, Result<Fetched, InstallError>)| r.map(|t| (n, t)))
             .collect::<Result<_, _>>()?;
+        group.complete();
 
         let mut known = available.clone();
         let mut out = Vec::new();
@@ -464,11 +479,16 @@ impl Context<'_> {
 
     /// Downloads a package's source into `dir`: a tarball, or for Git sources a directory. The
     /// tarball's SHA-256 is returned when it can be recorded in the lockfile.
-    fn download_source(&self, w: &Wanted, dir: &Path) -> Result<Fetched, InstallError> {
+    fn download_source(
+        &self,
+        w: &Wanted,
+        dir: &Path,
+        transfers: &dyn Transfers,
+    ) -> Result<Fetched, InstallError> {
         match &w.origin {
             Origin::Unmanaged => Err(unmanaged(w)),
             Origin::Snapshot(date) => {
-                let (path, sha256) = self.download_cran_source(w, date, dir)?;
+                let (path, sha256) = self.download_cran_source(w, date, dir, transfers)?;
                 Ok(Fetched {
                     path,
                     sha256,
@@ -486,7 +506,7 @@ impl Context<'_> {
                             e.path.as_deref(),
                             "tar.gz",
                         );
-                        let bytes = self.http.get_bytes(&file_url, None)?;
+                        let bytes = self.http.get_tracked(&file_url, &w.name, transfers)?;
                         check_sha256(w, &bytes, e.sha256.as_deref())?;
                         match check_sha256(w, &bytes, w.sha256.as_deref()) {
                             Ok(()) => {
@@ -605,6 +625,7 @@ impl Context<'_> {
         w: &Wanted,
         date: &str,
         dir: &Path,
+        transfers: &dyn Transfers,
     ) -> Result<(PathBuf, Option<String>), InstallError> {
         let file = format!("{}_{}.tar.gz", w.name, w.version);
         let cran = [
@@ -613,7 +634,7 @@ impl Context<'_> {
         ];
         let path = dir.join(&file);
         for url in &cran {
-            match self.http.get_bytes(url, None) {
+            match self.http.get_tracked(url, &w.name, transfers) {
                 Ok(bytes) => {
                     check_sha256(w, &bytes, w.sha256.as_deref())?;
                     std::fs::write(&path, &bytes).map_err(io_err(&path))?;
@@ -624,10 +645,11 @@ impl Context<'_> {
                 Err(_) => break,
             }
         }
-        match self
-            .http
-            .get_bytes(&self.p3m.source_url(date, &w.name, &w.version), None)
-        {
+        match self.http.get_tracked(
+            &self.p3m.source_url(date, &w.name, &w.version),
+            &w.name,
+            transfers,
+        ) {
             Ok(bytes) => {
                 std::fs::write(&path, &bytes).map_err(io_err(&path))?;
                 Ok((path, None))

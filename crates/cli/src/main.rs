@@ -3,6 +3,7 @@
 mod activate;
 mod commands;
 mod import;
+mod progress;
 mod rcmd;
 mod selfcmd;
 mod ui;
@@ -28,6 +29,10 @@ struct Cli {
     /// Answer yes to the question with this id (used by the R package after asking).
     #[arg(long, global = true, value_name = "ID", hide = true)]
     confirmed: Vec<String>,
+    /// Write messages, progress, the process id and the exit status to this file (used by the
+    /// R package, which runs rok in the background and draws the progress itself).
+    #[arg(long, global = true, value_name = "FILE", hide = true)]
+    events: Option<PathBuf>,
     #[command(subcommand)]
     command: Command,
 }
@@ -226,7 +231,17 @@ enum RCommand {
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
-    let ui = ui::Ui::new(cli.yes, cli.json, cli.confirmed);
+    let events = cli.events.is_some();
+    let ui = match ui::Ui::new(cli.yes, cli.json, cli.confirmed, cli.events.as_deref()) {
+        Ok(ui) => ui,
+        Err(e) => {
+            eprintln!("✖ Could not write to the events file: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    if events {
+        ui.event("pid", &std::process::id().to_string());
+    }
     let project = cli.project.as_deref();
     let result = match cli.command {
         Command::Init { path, r, name } => commands::init(&ui, path, r, name),
@@ -268,7 +283,7 @@ fn main() -> ExitCode {
             RCommand::Pin { version, strategy } => rcmd::pin(&ui, project, &version, strategy),
         },
         Command::Status { packages, check } => match commands::status(&ui, project, packages) {
-            Ok(true) if check => return ExitCode::FAILURE,
+            Ok(true) if check => Err(StatusCheckFailed.into()),
             other => other.map(|_| ()),
         },
         Command::Why { package } => commands::why(&ui, project, &package),
@@ -277,14 +292,16 @@ fn main() -> ExitCode {
             command: SelfCommand::Update { prerelease },
         } => selfcmd::update(&ui, prerelease),
     };
-    match result {
-        Ok(()) => ExitCode::SUCCESS,
+    let code = match result {
+        Ok(()) => 0,
         // A program asked rok to do something that needs an answer: hand the question back.
         Err(e) if e.downcast_ref::<ui::NeedsAnswer>().is_some() => {
             let needs = e.downcast_ref::<ui::NeedsAnswer>().expect("checked");
             println!("{}", needs.to_json());
-            ExitCode::from(2)
+            2
         }
+        // `status --check` found problems: they were shown already.
+        Err(e) if e.is::<StatusCheckFailed>() => 1,
         Err(e) => {
             let mut msg = e.to_string();
             for cause in e.chain().skip(1) {
@@ -295,7 +312,23 @@ fn main() -> ExitCode {
                 }
             }
             ui.error(&msg);
-            ExitCode::FAILURE
+            1
         }
+    };
+    if events {
+        ui.event("exit", &code.to_string());
+    }
+    ExitCode::from(code)
+}
+
+/// `rok status --check` found something to fix.
+#[derive(Debug)]
+struct StatusCheckFailed;
+
+impl std::fmt::Display for StatusCheckFailed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("The project needs attention.")
     }
 }
+
+impl std::error::Error for StatusCheckFailed {}

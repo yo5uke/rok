@@ -31,4 +31,5 @@ pub mod rpkgs;
 pub mod scan;
 pub mod status;
 pub mod syslibs;
+pub mod transfer;
 pub mod version;

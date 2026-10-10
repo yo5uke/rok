@@ -92,9 +92,14 @@ pub(crate) fn install_r(
 ) -> anyhow::Result<RInstallation> {
     let start = Instant::now();
     ui.info(&format!("Installing R {version}: {reason}."));
-    let installed = rinstall::install(&env.http, &env.dirs, &env.platform, version, &|m| {
-        ui.step(m)
-    })?;
+    let installed = rinstall::install(
+        &env.http,
+        &env.dirs,
+        &env.platform,
+        version,
+        &ui.transfers(),
+        &|m| ui.step(m),
+    )?;
     let r = installed.installation;
     ui.success(&format!(
         "Installed R {version} at {} ({}) in {:.1}s",

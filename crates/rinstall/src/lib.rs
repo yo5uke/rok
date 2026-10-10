@@ -16,6 +16,7 @@ use rok_core::http::{Http, HttpError};
 use rok_core::paths::UserDirs;
 use rok_core::platform::{Arch, LinuxDistro, Os, Platform};
 use rok_core::rdetect::{self, RInstallation, RKind};
+use rok_core::transfer::{Group, Transfers};
 use rok_core::version::Version;
 
 /// Where Posit publishes its R builds.
@@ -371,12 +372,14 @@ pub fn is_built_for(platform: &Platform, version: &Version) -> bool {
     }
 }
 
-/// Installs R `version` into `<data>/r/<version>`. `progress` receives one line per step.
+/// Installs R `version` into `<data>/r/<version>`. `progress` receives one line per step, and
+/// `transfers` the progress of the download.
 pub fn install(
     http: &Http,
     dirs: &UserDirs,
     platform: &Platform,
     version: &Version,
+    transfers: &dyn Transfers,
     progress: &dyn Fn(&str),
 ) -> Result<Installed, RInstallError> {
     let target = install_dir(dirs, version);
@@ -411,7 +414,7 @@ pub fn install(
         });
     };
 
-    install_build(http, dirs, &build, version, progress)
+    install_build(http, dirs, &build, version, transfers, progress)
 }
 
 /// Installs one particular build of R `version` into [`install_dir`].
@@ -420,6 +423,7 @@ pub fn install_build(
     dirs: &UserDirs,
     build: &Build,
     version: &Version,
+    transfers: &dyn Transfers,
     progress: &dyn Fn(&str),
 ) -> Result<Installed, RInstallError> {
     let target = install_dir(dirs, version);
@@ -438,8 +442,11 @@ pub fn install_build(
         .map_err(io_err(&root))?;
     let zip = build.url.ends_with(".zip");
     let archive = work.path().join(if zip { "R.zip" } else { "R.tar.gz" });
-    progress(&format!("Downloading R {version} ({})", build.kind));
-    http.download(&build.url, &archive)?;
+    let what = format!("R {version} ({})", build.kind);
+    let group = Group::begin(transfers, &what, 1);
+    http.download(&build.url, &archive, &what, transfers)?;
+    transfers.finish(&what);
+    group.complete();
     progress(&format!("Unpacking R {version}"));
     let unpack = work.path().join("unpack");
     let file = std::fs::File::open(&archive).map_err(io_err(&archive))?;
@@ -722,7 +729,15 @@ mod tests {
         // R's scripts warn when the two spellings of R_HOME differ.
         let dirs = UserDirs::under(&rok_core::fsutil::canonicalize(t.path()).unwrap());
         let version = v("4.5.3");
-        let installed = install(&Http::new(), &dirs, &platform, &version, &|_| {}).unwrap();
+        let installed = install(
+            &Http::new(),
+            &dirs,
+            &platform,
+            &version,
+            &rok_core::transfer::Quiet,
+            &|_| {},
+        )
+        .unwrap();
         assert_eq!(installed.build, BuildKind::Portable);
         let r = installed.installation;
         assert!(is_managed(&dirs, &version));
@@ -756,8 +771,15 @@ mod tests {
         let version = v("4.4.2");
         let build = builds(&platform, None, &version).unwrap().remove(0);
         assert_eq!(build.kind, BuildKind::Distribution(name));
-        let installed =
-            install_build(&Http::new(), &dirs, &build, &version, &|m| eprintln!("{m}")).unwrap();
+        let installed = install_build(
+            &Http::new(),
+            &dirs,
+            &build,
+            &version,
+            &rok_core::transfer::Quiet,
+            &|m| eprintln!("{m}"),
+        )
+        .unwrap();
         let rscript = installed.installation.rscript();
         let out = Command::new(&rscript)
             .args(["-e", "cat(R.home(), R.version.string, sep = '\\n')"])
