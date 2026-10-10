@@ -1,12 +1,19 @@
 name: Release
 
-# A tag `v<version>` publishes a release: the binary for each target (`rok-<target>.tar.gz`,
-# with its `.sha256`) and the R package's source (`rok_<version>.tar.gz`). Run by hand, it only
-# builds the files (a dry run).
+# A tag `v<version>` publishes a pre-release: the binary for each target (`rok-<target>.tar.gz`,
+# with its `.sha256`) and the R package's source (`rok_<version>.tar.gz`). Once it has been
+# checked (`rok::setup()` from it, `init()`, `add()`), run this workflow by hand on the tag with
+# `promote` to make it a full release, which `rok self update` offers to everyone. Run by hand
+# without `promote`, it only builds the files (a dry run).
 on:
   push:
     tags: ["v*"]
   workflow_dispatch:
+    inputs:
+      promote:
+        description: Make the pre-release of this tag a full release (run it on the tag)
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -17,6 +24,7 @@ env:
 jobs:
   versions:
     name: Check versions
+    if: ${{ !inputs.promote }}
     runs-on: ubuntu-24.04
     outputs:
       version: ${{ steps.v.outputs.version }}
@@ -88,7 +96,7 @@ jobs:
   publish:
     name: Publish
     needs: [versions, binary, rpkg]
-    if: github.ref_type == 'tag'
+    if: github.ref_type == 'tag' && !inputs.promote
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/download-artifact@v4
@@ -104,3 +112,17 @@ jobs:
           gh release create "$GITHUB_REF_NAME" files/* --repo "$GITHUB_REPOSITORY" --prerelease \
             --title "rok $VERSION" \
             --notes "rok $VERSION (pre-release). Install the R package from \`rok_$VERSION.tar.gz\`, then run \`rok::setup()\`; or download the binary for your machine."
+
+  promote:
+    name: Promote to a full release
+    if: ${{ inputs.promote }}
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Make the release a full one
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          [ "$GITHUB_REF_TYPE" = tag ] || { echo "::error::run it on the tag, not on $GITHUB_REF_NAME"; exit 1; }
+          version=${GITHUB_REF_NAME#v}
+          gh release edit "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --prerelease=false --latest \
+            --notes "rok $version. Install the R package (\`rok_$version.tar.gz\`), then run \`rok::setup()\`; or download the binary for your machine."
