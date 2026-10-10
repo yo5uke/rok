@@ -4,9 +4,9 @@
 \name{rok-package}
 \alias{rok}
 \alias{rok-package}
-\title{rok: Fast Package and Project Manager for R}
+\title{rok: Fast Package and Project Manager}
 \description{
-Manages the packages and the R version of a project, in the spirit of 'uv' for 'Python'. Packages are resolved from dated snapshots of the 'Posit Package Manager' and recorded in a lockfile, so that a project can be reproduced as it was. The work is done by the 'rok' command-line program, which this package downloads on first use, after asking.
+Manages the packages and the R version of a project. Packages are resolved from dated snapshots of the 'Posit Package Manager' \url{https://packagemanager.posit.co} and recorded in a lockfile, so that a project can be reproduced as it was. The work is done by the 'rok' command-line program, which this package downloads from the project's GitHub releases on first use, after asking for user consent.
 }
 \details{
 rok manages the packages and the R version of a project. Packages are declared in
@@ -22,6 +22,14 @@ this package call it.
 }
 }
 
+\seealso{
+Useful links:
+\itemize{
+  \item \url{https://github.com/yo5uke/rok}
+  \item Report bugs at \url{https://github.com/yo5uke/rok/issues}
+}
+
+}
 \author{
 \strong{Maintainer}: Yosuke Abe \email{yosuke.abe0507@gmail.com} [copyright holder]
 
