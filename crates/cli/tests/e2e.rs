@@ -63,6 +63,13 @@ fn init_add_sync_remove() {
         "R6 is not in {}",
         lib.display()
     );
+    // The R package compares these with the loaded packages, to prompt to restart R (the
+    // library is relative to where rok ran, as `--project` is).
+    assert_eq!(added["linked"][0], "R6");
+    assert_eq!(
+        std::fs::canonicalize(home.join(added["library"].as_str().unwrap())).unwrap(),
+        std::fs::canonicalize(&lib).unwrap()
+    );
 
     // status: in sync (exit 0); why and tree read the lockfile.
     assert!(rok(&proj, &["status", "--check"]).status.success());

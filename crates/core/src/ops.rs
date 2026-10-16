@@ -912,6 +912,8 @@ pub struct SyncReport {
     pub link: LinkReport,
     /// Every package of the library with its path in the cache.
     pub paths: Vec<(String, PathBuf)>,
+    /// The library that was synced.
+    pub library: PathBuf,
 }
 
 /// Carries out a plan: downloads binaries, builds sources, then links the library.
@@ -959,6 +961,7 @@ pub fn execute_sync(
         built,
         link,
         paths: all,
+        library: library.to_path_buf(),
     })
 }
 

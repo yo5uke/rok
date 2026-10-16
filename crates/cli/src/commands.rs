@@ -225,6 +225,7 @@ pub(crate) fn report_json(
         "built": report.built.iter().map(|b| b.name.clone()).collect::<Vec<_>>(),
         "linked": report.link.linked,
         "unlinked": report.link.removed,
+        "library": report.library.to_string_lossy(),
     })
 }
 

@@ -63,7 +63,7 @@ init <- function(path = ".", r = NULL, name = NULL) {
 add <- function(..., version = NULL, latest = FALSE, project = ".") {
   pkgs <- c(...)
   if (!length(pkgs)) stop("Give at least one package.", call. = FALSE)
-  invisible(rok_call(c(
+  advise_restart(rok_call(c(
     "add", pkgs, opt("--version", version), if (latest) "--latest", project_arg(project)
   )))
 }
@@ -94,7 +94,7 @@ remove <- function(..., project = ".") {
   }
   pkgs <- c(...)
   if (!length(pkgs)) stop("Give at least one package.", call. = FALSE)
-  invisible(rok_call(c("remove", pkgs, project_arg(project))))
+  advise_restart(rok_call(c("remove", pkgs, project_arg(project))))
 }
 
 #' Make the library match the lockfile
@@ -110,7 +110,7 @@ remove <- function(..., project = ".") {
 #' init(dir)
 #' sync(project = dir)
 sync <- function(locked = FALSE, project = ".") {
-  invisible(rok_call(c("sync", if (locked) "--locked", project_arg(project))))
+  advise_restart(rok_call(c("sync", if (locked) "--locked", project_arg(project))))
 }
 
 #' Update packages
@@ -148,7 +148,7 @@ update <- function(..., to = NULL, dry_run = FALSE, project = ".") {
   if (...length() && !length(pkgs)) {
     stop("No packages were given; call `update()` to update the whole project.", call. = FALSE)
   }
-  invisible(rok_call(c(
+  advise_restart(rok_call(c(
     "update", pkgs, opt("--to", to), if (dry_run) "--dry-run", project_arg(project)
   )))
 }
@@ -167,7 +167,7 @@ update <- function(..., to = NULL, dry_run = FALSE, project = ".") {
 #' add("R6", project = dir)
 #' undo(project = dir)
 undo <- function(project = ".") {
-  invisible(rok_call(c("undo", project_arg(project))))
+  advise_restart(rok_call(c("undo", project_arg(project))))
 }
 
 #' Show the project's status
@@ -272,7 +272,7 @@ run <- function(file, args = character(), r = NULL, project = ".") {
 #' init(dir)
 #' pin_r("latest", project = dir)
 pin_r <- function(version, strategy = NULL, project = ".") {
-  invisible(rok_call(c(
+  advise_restart(rok_call(c(
     "r", "pin", version, opt("--strategy", strategy), project_arg(project)
   )))
 }

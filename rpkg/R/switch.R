@@ -85,3 +85,26 @@ switch_to_project <- function(root, r_version) {
   )
   invisible()
 }
+
+# Packages this session loaded before a command re-linked or removed them in its library
+# (requirements chapter 5): they stay as loaded until R restarts. Only when the session uses
+# that library. `result` is the command's result.
+stale_loaded <- function(result, loaded = loadedNamespaces(), libs = .libPaths()) {
+  if (!is.list(result) || is.null(result$library)) return(character())
+  norm <- function(p) normalizePath(p, winslash = "/", mustWork = FALSE)
+  if (!norm(result$library) %in% norm(libs)) return(character())
+  sort(intersect(as.character(c(unlist(result$linked), unlist(result$unlinked))), loaded))
+}
+
+# Prompts to restart R if the command changed loaded packages. Returns `result` invisibly.
+advise_restart <- function(result) {
+  pkgs <- stale_loaded(result)
+  if (length(pkgs)) {
+    message(
+      "! This R session still uses ", paste(pkgs, collapse = ", "),
+      " as loaded before the change.\n",
+      "\u2139 Restart R to use the library as rok.lock records it."
+    )
+  }
+  invisible(result)
+}

@@ -20,3 +20,18 @@ local({
   assign(".hidden", 1, envir = env)
   stopifnot(identical(sort(rok:::global_objects(env)), c(".hidden", "fit")))
 })
+
+# After add(), update() and the like: the loaded packages they changed, if the session uses
+# the library they changed.
+local({
+  lib <- tempfile("lib")
+  dir.create(lib)
+  res <- list(library = lib, linked = list("fixest", "R6"), unlinked = list("old"))
+  stale <- function(...) rok:::stale_loaded(res, ...)
+  stopifnot(
+    identical(stale(c("base", "fixest", "old"), c(lib, .Library)), c("fixest", "old")),
+    identical(stale(c("base", "fixest"), .Library), character()),
+    identical(stale("base", lib), character()),
+    identical(rok:::stale_loaded(list(command = "update", dry_run = TRUE)), character())
+  )
+})
