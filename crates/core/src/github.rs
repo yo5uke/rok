@@ -5,6 +5,8 @@
 //! codeload.github.com, which do not count against that limit. A token is read from
 //! `GITHUB_PAT`, `GITHUB_TOKEN` or `GH_TOKEN`, as pak does; it is sent only to GitHub.
 
+use std::path::PathBuf;
+
 use crate::http::{Http, HttpError};
 use crate::manifest::GitRef;
 
@@ -35,6 +37,8 @@ pub enum GitHubError {
 pub struct GitHub<'a> {
     http: &'a Http,
     token: Option<String>,
+    /// Where DESCRIPTION files at commits are kept (see [`GitHub::with_cache`]).
+    cache: Option<PathBuf>,
 }
 
 impl<'a> GitHub<'a> {
@@ -44,7 +48,17 @@ impl<'a> GitHub<'a> {
             .iter()
             .find_map(|k| std::env::var(k).ok().filter(|v| !v.trim().is_empty()))
             .map(|t| t.trim().to_string());
-        GitHub { http, token }
+        GitHub {
+            http,
+            token,
+            cache: None,
+        }
+    }
+
+    /// Keeps the DESCRIPTION files read at commits in `dir`: they never change.
+    pub fn with_cache(mut self, dir: PathBuf) -> GitHub<'a> {
+        self.cache = Some(dir);
+        self
     }
 
     pub fn has_token(&self) -> bool {
@@ -110,7 +124,7 @@ impl<'a> GitHub<'a> {
         ) {
             Ok(body) => {
                 let sha = String::from_utf8_lossy(&body).trim().to_string();
-                if sha.len() == 40 && sha.bytes().all(|b| b.is_ascii_hexdigit()) {
+                if is_sha(&sha) {
                     Ok(sha.to_ascii_lowercase())
                 } else {
                     Err(GitHubError::Response {
@@ -181,13 +195,25 @@ impl<'a> GitHub<'a> {
         })
     }
 
-    /// The DESCRIPTION file at a commit.
+    /// The DESCRIPTION file at a commit, from the cache when it is a full commit SHA read
+    /// before.
     pub fn description(
         &self,
         owner: &str,
         repo: &str,
         commit: &str,
     ) -> Result<String, GitHubError> {
+        let cached = self
+            .cache
+            .as_ref()
+            .filter(|_| is_sha(commit) && !owner.starts_with('.') && !repo.starts_with('.'))
+            .map(|d| d.join(owner).join(repo).join(commit).join("DESCRIPTION"));
+        if let Some(text) = cached
+            .as_ref()
+            .and_then(|p| std::fs::read_to_string(p).ok())
+        {
+            return Ok(text);
+        }
         let url = format!("https://raw.githubusercontent.com/{owner}/{repo}/{commit}/DESCRIPTION");
         let auth = self.token.as_ref().map(|t| format!("Bearer {t}"));
         let headers: Vec<(&str, &str)> =
@@ -199,7 +225,12 @@ impl<'a> GitHub<'a> {
             },
             other => other.into(),
         })?;
-        Ok(String::from_utf8_lossy(&body).into_owned())
+        let text = String::from_utf8_lossy(&body).into_owned();
+        if let Some(p) = &cached {
+            // Only a cache: reading it again from GitHub works too.
+            let _ = crate::fsutil::write_atomic(p, text.as_bytes());
+        }
+        Ok(text)
     }
 
     /// Downloads the source at a commit as a `.tar.gz` (top directory `<repo>-<commit>`).
@@ -237,6 +268,11 @@ impl<'a> GitHub<'a> {
     }
 }
 
+/// Whether `s` is a full commit SHA.
+fn is_sha(s: &str) -> bool {
+    s.len() == 40 && s.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
 /// The owner and repository of a GitHub URL (`https://github.com/owner/repo[.git]`).
 pub fn parse_url(url: &str) -> Option<(String, String)> {
     let rest = url
@@ -260,6 +296,22 @@ pub fn parse_spec(spec: &str) -> Option<(String, String, Option<String>)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reads_descriptions_at_commits_from_the_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        let commit = "a".repeat(40);
+        let path = dir.path().join("o/pkg").join(&commit).join("DESCRIPTION");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "Package: pkg\nVersion: 1.0\n").unwrap();
+        let http = Http::new();
+        let github = GitHub::new(&http).with_cache(dir.path().to_path_buf());
+        // No request is made: the repository does not exist.
+        assert_eq!(
+            github.description("o", "pkg", &commit).unwrap(),
+            "Package: pkg\nVersion: 1.0\n"
+        );
+    }
 
     #[test]
     fn parses_specs() {

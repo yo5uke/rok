@@ -101,7 +101,7 @@ impl Env {
     }
 
     pub fn github(&self) -> GitHub<'_> {
-        GitHub::new(&self.http)
+        GitHub::new(&self.http).with_cache(self.dirs.cache.join("github"))
     }
 
     pub fn r_installations(&self) -> Vec<RInstallation> {
@@ -280,6 +280,8 @@ pub fn resolve_lock_with(
     let kept = if keep.nothing { None } else { old };
     let repos = Repositories::new(&env.http, &env.dirs);
     let github = env.github();
+    let (minor, _) = manifest_r(manifest);
+    let library = crate::project::Project::new(root).library(&minor, &env.platform);
 
     // Packages from a repository or GitHub are offered only from there.
     let mut requirements = Vec::new();
@@ -307,7 +309,8 @@ pub fn resolve_lock_with(
                     .filter(|p| same_origin(&p.source, &origin))
                     && candidates.iter().all(|c| c.version != p.version)
                 {
-                    candidates.push(candidate_from_lock(p, origin.clone()));
+                    let described = installed_entry(&library, name);
+                    candidates.push(candidate_from_lock(p, origin.clone(), described));
                 }
                 if candidates.is_empty() {
                     return Err(OpError::Message(format!(
@@ -346,7 +349,11 @@ pub fn resolve_lock_with(
                             reference: reference.clone(),
                             commit: commit.clone(),
                         };
-                        candidate_from_lock(p, origin)
+                        let described = github
+                            .description(owner, repo, commit)
+                            .ok()
+                            .and_then(|text| parse_description(owner, repo, &text).ok());
+                        candidate_from_lock(p, origin, described)
                     }
                     _ => {
                         let (entry, commit) = read_github(&github, owner, repo, reference)?;
@@ -410,8 +417,6 @@ pub fn resolve_lock_with(
     // Unmanaged packages: the installed version is a fixed candidate, and its dependencies
     // that rok provides are resolved too (requirements chapter 7). Dependencies rok cannot
     // provide (such as other Bioconductor packages) are left to the user.
-    let (minor, _) = manifest_r(manifest);
-    let library = crate::project::Project::new(root).library(&minor, &env.platform);
     for name in &manifest.unmanaged {
         let Some(entry) = installed_entry(&library, name) else {
             continue;
@@ -591,8 +596,20 @@ fn same_origin(source: &Source, origin: &Origin) -> bool {
 }
 
 /// A candidate made from the lockfile, for a version its source no longer lists or a GitHub
-/// commit that need not be looked up again. Its dependencies are known by name only.
-fn candidate_from_lock(p: &LockedPackage, origin: Origin) -> Candidate {
+/// commit that need not be looked up again. The lockfile names the dependencies only: their
+/// constraints and R's come from the package's DESCRIPTION (`described`, if it is of the locked
+/// version), and without it, any version is allowed.
+fn candidate_from_lock(
+    p: &LockedPackage,
+    origin: Origin,
+    described: Option<IndexEntry>,
+) -> Candidate {
+    if let Some(e) = described.filter(|e| e.version == p.version) {
+        return Candidate {
+            sha256: p.sha256.clone(),
+            ..Candidate::from_entry(&e, origin)
+        };
+    }
     Candidate {
         version: p.version.clone(),
         origin,
@@ -620,9 +637,14 @@ pub fn read_github(
 ) -> Result<(IndexEntry, String), OpError> {
     let commit = github.resolve(owner, repo, reference)?;
     let text = github.description(owner, repo, &commit)?;
-    let index = Index::parse_repository(&format!("{owner}/{repo}"), &text);
+    Ok((parse_description(owner, repo, &text)?, commit))
+}
+
+/// The package that a DESCRIPTION read from GitHub describes.
+fn parse_description(owner: &str, repo: &str, text: &str) -> Result<IndexEntry, OpError> {
+    let index = Index::parse_repository(&format!("{owner}/{repo}"), text);
     match index.iter().next() {
-        Some(e) => Ok((e.clone(), commit)),
+        Some(e) => Ok(e.clone()),
         None => Err(OpError::Message(format!(
             "{owner}/{repo}: cannot read its DESCRIPTION{}",
             index
@@ -1164,6 +1186,44 @@ mod tests {
             r_home: PathBuf::from(format!("/r/{v}/{kind:?}")),
             executable: PathBuf::from("R"),
             kind,
+        }
+    }
+
+    #[test]
+    fn locked_candidates_keep_the_constraints_of_their_description() {
+        let p = LockedPackage {
+            name: "pkg".into(),
+            version: "1.0".parse().unwrap(),
+            source: Source::Unmanaged,
+            dependencies: vec!["foo".into()],
+            sha256: Some("s".into()),
+            env: BTreeMap::new(),
+            sysreqs: BTreeMap::new(),
+        };
+        let entry = |version: &str| {
+            parse_description(
+                "o",
+                "pkg",
+                &format!(
+                    "Package: pkg\nVersion: {version}\nDepends: R (>= 4.5.0)\nImports: foo (< 2.0)\n"
+                ),
+            )
+            .unwrap()
+        };
+        let old: Version = "4.4.0".parse().unwrap();
+        let foo2: Version = "2.0".parse().unwrap();
+
+        let c = candidate_from_lock(&p, Origin::Unmanaged, Some(entry("1.0")));
+        assert!(!c.r_constraint.matches(&old));
+        assert_eq!(c.dependencies[0].name, "foo");
+        assert!(!c.dependencies[0].constraint.matches(&foo2));
+        assert_eq!(c.sha256.as_deref(), Some("s"));
+
+        // Another version's DESCRIPTION, or none: the names only.
+        for described in [Some(entry("1.1")), None] {
+            let c = candidate_from_lock(&p, Origin::Unmanaged, described);
+            assert!(c.r_constraint.matches(&old));
+            assert!(c.dependencies[0].constraint.matches(&foo2));
         }
     }
 
