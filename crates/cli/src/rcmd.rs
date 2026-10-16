@@ -4,7 +4,7 @@ use std::path::Path;
 use std::process::ExitCode;
 use std::time::Instant;
 
-use anyhow::bail;
+use anyhow::{Context as _, bail};
 use rok_core::lockfile::Lockfile;
 use rok_core::manifest::Manifest;
 use rok_core::ops::{self, Env, Keep, plural};
@@ -720,11 +720,17 @@ pub fn run(
                     r.version
                 ));
             }
-            let library = project.library(&r.version.minor(), &env.platform);
+            let minor = r.version.minor();
+            // The project library, rok's own R package, and R's own: no user or site libraries
+            // (as activate.R; requirements chapter 4).
+            let own = env.dirs.data.join("library").join(format!("R-{minor}"));
+            let libs = std::iter::once(project.library(&minor, &env.platform))
+                .chain(Some(own).filter(|d| d.is_dir()));
+            let libs = std::env::join_paths(libs)
+                .context("a library path cannot be passed to R in R_LIBS")?;
             cmd = std::process::Command::new(r.rscript());
-            // Only the project library and R's own: no user or site libraries (as activate.R).
             let none = project.root.join(".rok").join("none");
-            cmd.env("R_LIBS", &library)
+            cmd.env("R_LIBS", &libs)
                 .env("R_LIBS_USER", &none)
                 .env("R_LIBS_SITE", &none);
         }

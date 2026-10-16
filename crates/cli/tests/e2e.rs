@@ -161,12 +161,21 @@ fn runs_scripts_with_the_project_library() {
     json(&rok(&proj, &["add", "R6", "--json"]));
     std::fs::write(
         proj.join("s.R"),
-        "library(R6)\ncat(.libPaths()[1], commandArgs(TRUE), sep = '\\n')\nquit(status = 3)\n",
+        "library(R6)\ncat(.libPaths(), commandArgs(TRUE), sep = '\\n')\nquit(status = 3)\n",
     )
     .unwrap();
+    // Where rok's own R package is kept for this R (requirements chapter 4; rok() puts the data
+    // directory in the directory it runs in).
+    let minor = std::fs::read_dir(proj.join(".rok/library"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .file_name();
+    std::fs::create_dir_all(proj.join("data/library").join(&minor)).unwrap();
 
-    // The script sees the project library first, gets its arguments, and its exit status
-    // becomes rok's.
+    // The script sees the project library first, then rok's own, gets its arguments, and its
+    // exit status becomes rok's.
     let out = rok(&proj, &["run", "s.R", "--flag", "x"]);
     assert_eq!(
         out.status.code(),
@@ -175,7 +184,9 @@ fn runs_scripts_with_the_project_library() {
         String::from_utf8_lossy(&out.stderr)
     );
     let stdout = unix_text(&out.stdout);
-    assert!(stdout.contains("/.rok/library/R-"), "{stdout}");
+    let libs: Vec<&str> = stdout.lines().collect();
+    assert!(libs[0].contains("/.rok/library/R-"), "{stdout}");
+    assert!(libs[1].contains("/data/library/R-"), "{stdout}");
     assert!(stdout.contains("--flag\nx"), "{stdout}");
 
     let list = json(&rok(&proj, &["r", "list", "--json"]));
