@@ -200,14 +200,8 @@ pub fn check(inputs: &Inputs) -> Vec<Problem> {
     if let Some(l) = lock {
         let mut details = Vec::new();
         for p in &l.packages {
-            // Unmanaged packages are the user's to install; only a missing one is a problem.
+            // Unmanaged packages are the user's to install (see below).
             if p.source == Source::Unmanaged {
-                if !library.contains_key(&p.name) {
-                    details.push(format!(
-                        "{} is not installed (it is unmanaged: install it yourself, for example with BiocManager::install())",
-                        p.name
-                    ));
-                }
                 continue;
             }
             match library.get(&p.name) {
@@ -251,6 +245,30 @@ pub fn check(inputs: &Inputs) -> Vec<Problem> {
                 fix: Some("Run `rok sync`.".to_string()),
             });
         }
+    }
+    // Unmanaged packages are the user's to install: `rok sync` does not install them.
+    let missing: Vec<String> = manifest
+        .unmanaged
+        .iter()
+        .filter(|n| !library.contains_key(n.as_str()))
+        .cloned()
+        .collect();
+    if !missing.is_empty() {
+        let n = missing.len();
+        problems.push(Problem {
+            level: Level::Warning,
+            code: "unmanaged-missing",
+            message: format!(
+                "{n} unmanaged package{} {} not installed.",
+                ops::plural(n),
+                if n == 1 { "is" } else { "are" }
+            ),
+            details: missing,
+            fix: Some(format!(
+                "Install {} yourself, for example with BiocManager::install().",
+                if n == 1 { "it" } else { "them" }
+            )),
+        });
     }
 
     // 4. System libraries.
@@ -402,20 +420,27 @@ pub fn check(inputs: &Inputs) -> Vec<Problem> {
             });
         }
     }
+    // Packages rok did not install: those listed in [unmanaged], whether or not rok.lock
+    // records them, and others.
     let in_lock = |n: &str| lock.is_some_and(|l| l.package(n).is_some());
-    let (unmanaged, outside): (Vec<String>, Vec<String>) = library
-        .iter()
-        .filter(|(n, i)| matches!(i, Installed::Other { .. }) && !in_lock(n))
-        .map(|(n, i)| match i.version() {
-            Some(v) => format!("{n} {v}"),
-            None => n.clone(),
-        })
-        .partition(|label| {
-            manifest
-                .unmanaged
-                .iter()
-                .any(|u| label.split(' ').next() == Some(u.as_str()))
-        });
+    let listed = |n: &str| manifest.unmanaged.iter().any(|u| u == n);
+    let label = |n: &str, i: &Installed| match i.version() {
+        Some(v) => format!("{n} {v}"),
+        None => n.to_string(),
+    };
+    let others = || {
+        library
+            .iter()
+            .filter(|(_, i)| matches!(i, Installed::Other { .. }))
+    };
+    let unmanaged: Vec<String> = others()
+        .filter(|(n, _)| listed(n))
+        .map(|(n, i)| label(n, i))
+        .collect();
+    let outside: Vec<String> = others()
+        .filter(|(n, _)| !listed(n) && !in_lock(n))
+        .map(|(n, i)| label(n, i))
+        .collect();
     if !unmanaged.is_empty() {
         problems.push(Problem {
             level: Level::Info,
@@ -536,12 +561,13 @@ fn manifest_differences(manifest: &Manifest, lock: &Lockfile) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::lockfile::LockedPackage;
     use crate::rdetect::RKind;
     use std::path::PathBuf;
 
     fn manifest(deps: &str) -> Manifest {
         Manifest::parse(&format!(
-            "[project]\nname = \"p\"\nr = \"4.6\"\nsnapshot = \"2026-10-01\"\n[dependencies]\n{deps}\n[unmanaged]\npackages = [\"limma\"]\n"
+            "[project]\nname = \"p\"\nr = \"4.6\"\nsnapshot = \"2026-10-01\"\n[dependencies]\n{deps}\n"
         ))
         .unwrap()
     }
@@ -549,7 +575,7 @@ mod tests {
     fn lock() -> Lockfile {
         Lockfile::parse(
             "version = 1\ngenerated-by = \"rok\"\n[r]\nversion = \"4.6.1\"\n[snapshot]\ndate = \"2026-10-01\"\nrepository = \"x\"\n\
-             [manifest]\ndependencies = [\"fixest\"]\nunmanaged = [\"limma\"]\n\
+             [manifest]\ndependencies = [\"fixest\"]\n\
              [[package]]\nname = \"fixest\"\nversion = \"0.12.1\"\nsource = { repository = \"cran\", snapshot = \"2024-06-14\" }\ndependencies = [\"Rcpp\"]\n\
              [[package]]\nname = \"Rcpp\"\nversion = \"1.1.2\"\nsource = { repository = \"cran\", snapshot = \"2026-10-01\" }\n",
         )
@@ -605,7 +631,7 @@ mod tests {
         let commit = "a".repeat(40);
         let l = Lockfile::parse(&format!(
             "version = 1\ngenerated-by = \"rok\"\n[r]\nversion = \"4.6.1\"\n[snapshot]\ndate = \"2026-10-01\"\nrepository = \"x\"\n\
-             [manifest]\ndependencies = [\"praise\"]\nsources = {{ praise = \"github:o/praise\" }}\nunmanaged = [\"limma\"]\n\
+             [manifest]\ndependencies = [\"praise\"]\nsources = {{ praise = \"github:o/praise\" }}\n\
              [[package]]\nname = \"praise\"\nversion = \"1.0.0\"\nsource = {{ github = \"o/praise\", commit = \"{commit}\" }}\n"
         ))
         .unwrap();
@@ -760,7 +786,20 @@ mod tests {
             ),
             ("mine".to_string(), Installed::Other { version: None }),
         ]);
-        let (m, l) = (manifest("fixest = \"*\"\nsf = \"*\""), lock());
+        // limma is unmanaged and recorded in rok.lock; DESeq2 is unmanaged but not installed.
+        let unmanaged = "[unmanaged]\npackages = [\"limma\", \"DESeq2\"]\n";
+        let m = manifest(&format!("fixest = \"*\"\nsf = \"*\"\n{unmanaged}"));
+        let mut l = lock();
+        l.manifest.unmanaged = vec!["DESeq2".into(), "limma".into()];
+        l.packages.push(LockedPackage {
+            name: "limma".into(),
+            version: "3.60.0".parse().unwrap(),
+            source: Source::Unmanaged,
+            dependencies: Vec::new(),
+            sha256: None,
+            env: BTreeMap::new(),
+            sysreqs: BTreeMap::new(),
+        });
         let problems = check(&Inputs {
             manifest: &m,
             lock: Some(&l),
@@ -775,6 +814,7 @@ mod tests {
                 "r-missing",
                 "lock-outdated",
                 "library-mismatch",
+                "unmanaged-missing",
                 "mixed-dates",
                 "unmanaged",
                 "installed-outside"
@@ -789,8 +829,9 @@ mod tests {
                 "old is installed but not in rok.lock"
             ]
         );
-        assert_eq!(problems[4].details, ["limma 3.60.0"]);
-        assert_eq!(problems[5].details, ["mine"]);
+        assert_eq!(problems[3].details, ["DESeq2"]);
+        assert_eq!(problems[5].details, ["limma 3.60.0"]);
+        assert_eq!(problems[6].details, ["mine"]);
     }
 
     #[test]
