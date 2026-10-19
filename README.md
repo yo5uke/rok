@@ -55,6 +55,9 @@ rok::add("fixest", "modelsummary")
 # Pin GitHub packages to a commit
 rok::add("gaborcsardi/praise")
 
+# Take packages from another CRAN-like repository, by its URL
+rok::add("polars", repo = "https://community.r-multiverse.org")
+
 # Check what is out of sync
 rok::status()
 
@@ -122,6 +125,10 @@ snapshot = "2026-10-01"
 fixest = "< 0.15"
 sf = "*"
 praise = { github = "gaborcsardi/praise" }
+polars = { repo = "multiverse", env = { NOT_CRAN = "true" } }
+
+[repositories]
+multiverse = "https://community.r-multiverse.org"
 ```
 
 ## Coming from renv

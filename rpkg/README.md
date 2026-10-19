@@ -32,6 +32,9 @@ rok::add("fixest", "sf")
 # Pin GitHub packages to a commit
 rok::add("gaborcsardi/praise")
 
+# Take packages from another CRAN-like repository, by its URL
+rok::add("polars", repo = "https://community.r-multiverse.org")
+
 # Check what is out of sync
 rok::status()
 
