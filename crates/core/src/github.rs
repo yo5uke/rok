@@ -103,11 +103,11 @@ impl<'a> GitHub<'a> {
                     std::thread::sleep(Duration::from_secs(retry_after));
                     waited = true;
                 }
-                Refusal::Primary { resets_in } => {
-                    return Err(self.rate_limited(owner, repo, resets_in));
+                Refusal::Primary { limit, resets_in } => {
+                    return Err(self.rate_limited(owner, repo, limit, resets_in));
                 }
                 Refusal::Secondary { retry_after } => {
-                    return Err(self.rate_limited(owner, repo, Some(retry_after)));
+                    return Err(self.rate_limited(owner, repo, None, Some(retry_after)));
                 }
                 Refusal::Other(message) => {
                     return Err(GitHubError::Refused {
@@ -120,18 +120,30 @@ impl<'a> GitHub<'a> {
         }
     }
 
-    fn rate_limited(&self, owner: &str, repo: &str, resets_in: Option<u64>) -> GitHubError {
+    /// `limit` is the number of requests an hour GitHub allowed: 60 means it took the requests
+    /// as anonymous, even with a token.
+    fn rate_limited(
+        &self,
+        owner: &str,
+        repo: &str,
+        limit: Option<u64>,
+        resets_in: Option<u64>,
+    ) -> GitHubError {
+        let limit = match limit {
+            Some(n) => format!(" ({n} requests an hour)"),
+            None => String::new(),
+        };
         let when = match resets_in {
             Some(s) => format!(" (try again in {} min)", s.div_ceil(60).max(1)),
             None => String::new(),
         };
         let message = if self.has_token() {
             format!(
-                "{owner}/{repo}: GitHub's API rate limit for the token in GITHUB_PAT (or GITHUB_TOKEN, GH_TOKEN) was reached{when}."
+                "{owner}/{repo}: GitHub's API rate limit{limit} for the token in GITHUB_PAT (or GITHUB_TOKEN, GH_TOKEN) was reached{when}."
             )
         } else {
             format!(
-                "{owner}/{repo}: GitHub's API rate limit was reached{when}.\nSet GITHUB_PAT to a token to raise the limit."
+                "{owner}/{repo}: GitHub's API rate limit{limit} was reached{when}.\nSet GITHUB_PAT to a token to raise the limit."
             )
         };
         GitHubError::RateLimited { message }
@@ -322,8 +334,12 @@ const MAX_WAIT: u64 = 60;
 /// Why GitHub's API refused a request (403 or 429), as GitHub documents its rate limits.
 #[derive(Debug, PartialEq, Eq)]
 enum Refusal {
-    /// The hourly limit was used up; it resets in this many seconds, if GitHub said.
-    Primary { resets_in: Option<u64> },
+    /// The hourly limit (`limit` requests, if GitHub said) was used up; it resets in
+    /// `resets_in` seconds, if GitHub said.
+    Primary {
+        limit: Option<u64>,
+        resets_in: Option<u64>,
+    },
     /// A secondary limit (too many requests at once, for example): try again after this many
     /// seconds.
     Secondary { retry_after: u64 },
@@ -346,18 +362,21 @@ fn refusal(head: &Head, body: &[u8], now: u64) -> Refusal {
         return Refusal::Secondary { retry_after };
     }
     if head.header("x-ratelimit-remaining").map(str::trim) == Some("0") {
-        let resets_in = head
-            .header("x-ratelimit-reset")
-            .and_then(|v| v.trim().parse::<u64>().ok())
-            .map(|reset| reset.saturating_sub(now));
-        return Refusal::Primary { resets_in };
+        let number = |name: &str| head.header(name).and_then(|v| v.trim().parse::<u64>().ok());
+        return Refusal::Primary {
+            limit: number("x-ratelimit-limit"),
+            resets_in: number("x-ratelimit-reset").map(|reset| reset.saturating_sub(now)),
+        };
     }
     // Without the headers, GitHub's advice is to wait at least a minute.
     if lower.contains("secondary rate limit") || head.status == 429 {
         return Refusal::Secondary { retry_after: 60 };
     }
     if lower.contains("rate limit") {
-        return Refusal::Primary { resets_in: None };
+        return Refusal::Primary {
+            limit: None,
+            resets_in: None,
+        };
     }
     Refusal::Other(if message.is_empty() {
         format!("HTTP {}", head.status)
@@ -412,6 +431,7 @@ mod tests {
                 &head(
                     403,
                     &[
+                        ("x-ratelimit-limit", "60"),
                         ("x-ratelimit-remaining", "0"),
                         ("x-ratelimit-reset", "1300")
                     ]
@@ -420,6 +440,7 @@ mod tests {
                 1000
             ),
             Refusal::Primary {
+                limit: Some(60),
                 resets_in: Some(300)
             }
         );
