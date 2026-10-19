@@ -44,11 +44,17 @@ init <- function(path = ".", r = NULL, name = NULL) {
 #'
 #' Declares packages in `rok.toml`, then updates `rok.lock` and the project library. Accepts
 #' the same forms as pak: `"fixest"` from CRAN, `"owner/repo"` and `"owner/repo@ref"` from
-#' GitHub.
+#' GitHub. With `repo`, the packages come from that CRAN-like repository (such as R-multiverse
+#' or an r-universe), which is declared in `rok.toml` if it is not yet.
+#'
+#' Some packages build from source better with known environment variables (such as
+#' `NOT_CRAN = "true"` for polars). Adding them is offered before anything is installed.
 #'
 #' @param ... Package names or GitHub repositories.
 #' @param version A version constraint for one package, such as `"< 0.13"`.
 #' @param latest Take the packages from the latest snapshot, keeping the project's snapshot.
+#' @param repo The URL of one CRAN-like repository to take the packages from, such as
+#'   `"https://community.r-multiverse.org"`. CRAN's own URL means CRAN.
 #' @param project A directory of the project (default: the working directory).
 #' @returns The result (the changes), invisibly.
 #' @export
@@ -60,11 +66,18 @@ init <- function(path = ".", r = NULL, name = NULL) {
 #'
 #' # GitHub packages, optionally at a tag, branch or commit
 #' add("gaborcsardi/praise", project = dir)
-add <- function(..., version = NULL, latest = FALSE, project = ".") {
+#'
+#' # A package from a CRAN-like repository
+#' add("polars", repo = "https://community.r-multiverse.org", project = dir)
+add <- function(..., version = NULL, latest = FALSE, repo = NULL, project = ".") {
   pkgs <- c(...)
   if (!length(pkgs)) stop("Give at least one package.", call. = FALSE)
+  if (length(repo) > 1L) {
+    stop("`repo` takes the URL of one repository; CRAN packages need none.", call. = FALSE)
+  }
   advise_restart(rok_call(c(
-    "add", pkgs, opt("--version", version), if (latest) "--latest", project_arg(project)
+    "add", pkgs, opt("--version", version), if (latest) "--latest", opt("--repo", repo),
+    project_arg(project)
   )))
 }
 

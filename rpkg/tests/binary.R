@@ -28,6 +28,19 @@ local({
   )
 })
 
+# Without anyone to ask, an optional question is answered no and the command goes on; with
+# rok.yes, yes. Other questions stop.
+local({
+  needs <- list(id = "env-polars", question = "Set NOT_CRAN?", default = TRUE, optional = TRUE)
+  stopifnot(identical(rok:::ask(needs), c("--declined", "env-polars")))
+  op <- options(rok.yes = TRUE)
+  on.exit(options(op))
+  stopifnot(identical(rok:::ask(needs), c("--confirmed", "env-polars")))
+  options(rok.yes = NULL)
+  needs$optional <- NULL
+  stopifnot(inherits(try(rok:::ask(needs), silent = TRUE), "try-error"))
+})
+
 bin <- Sys.getenv("ROK_TEST_BINARY")
 if (nzchar(bin) && file.exists(bin)) {
   home <- tempfile("rok-test-")

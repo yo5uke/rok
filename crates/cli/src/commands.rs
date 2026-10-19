@@ -14,6 +14,7 @@ use rok_core::ops::{self, Env, plural};
 use rok_core::p3m::Index;
 use rok_core::project::Project;
 use rok_core::rdetect::RInstallation;
+use rok_core::repo::{self as repository, Repositories};
 use rok_core::resolve::Origin;
 use rok_core::rpkgs::is_base;
 use rok_core::scan::Mode;
@@ -479,6 +480,7 @@ pub fn add(
     packages: &[String],
     version: Option<String>,
     latest: bool,
+    repo: Option<String>,
 ) -> anyhow::Result<()> {
     let start = Instant::now();
     if version.is_some() && packages.len() != 1 {
@@ -525,6 +527,36 @@ pub fn add(
     let env = Env::from_env()?;
     let date = &manifest.project.snapshot;
 
+    // `--repo`: a CRAN-like repository by its URL, under the name rok.toml already gives it or
+    // a new one. CRAN's own URL means CRAN, which comes from the snapshot.
+    let from_repo = match repo.map(|u| u.trim().trim_end_matches('/').to_string()) {
+        Some(url) if !(url.starts_with("https://") || url.starts_with("http://")) => bail!(
+            "`--repo` takes the URL of a repository, such as https://community.r-multiverse.org, not `{url}`."
+        ),
+        Some(url) if !repository::is_cran_url(&url, &env.p3m.cran_base()) => {
+            if !from_github.is_empty() {
+                bail!("`--repo` applies to packages from CRAN-like repositories, not GitHub.");
+            }
+            if latest {
+                bail!("`--latest` applies to CRAN packages; other repositories have no snapshots.");
+            }
+            let declared = manifest
+                .repositories
+                .iter()
+                .find(|(_, u)| **u == url)
+                .map(|(alias, _)| alias.clone());
+            Some(match declared {
+                Some(alias) => (alias, url, false),
+                None => (
+                    repository::alias_for(&url, &manifest.repositories),
+                    url,
+                    true,
+                ),
+            })
+        }
+        _ => None,
+    };
+
     // `--latest`: the packages come from the latest snapshot; the project's snapshot stays.
     let mut keep = ops::Keep::default();
     if latest {
@@ -541,9 +573,19 @@ pub fn add(
             keep.newer = Some(newest);
         }
     }
+    if let Some((_, url, _)) = &from_repo {
+        let index = Repositories::new(&env.http, &env.dirs).source_index(url)?;
+        if let Some(p) = cran.iter().find(|p| index.get(p).is_none()) {
+            bail!("{p} is not in the repository {url}.");
+        }
+    }
     let lookup = keep.newer.as_ref().unwrap_or(date);
-    let index = env.p3m.index(lookup)?;
-    for p in &cran {
+    let index = if from_repo.is_none() {
+        env.p3m.index(lookup)?
+    } else {
+        Default::default()
+    };
+    for p in cran.iter().filter(|_| from_repo.is_none()) {
         if index.get(p).is_none() {
             let similar = index
                 .iter()
@@ -568,12 +610,22 @@ pub fn add(
             .map(|d| d.env.clone())
             .unwrap_or_default()
     };
+    if let Some((alias, url, true)) = &from_repo {
+        doc.set_repository(alias, url);
+    }
     let mut added = cran.clone();
     for p in &cran {
-        let spec = DependencySpec {
-            source: DependencySource::Cran {
+        let source = match &from_repo {
+            Some((alias, _, _)) => DependencySource::Repository {
+                alias: alias.clone(),
                 constraint: constraint.clone(),
             },
+            None => DependencySource::Cran {
+                constraint: constraint.clone(),
+            },
+        };
+        let spec = DependencySpec {
+            source,
             env: env_of(p),
         };
         doc.set_dependency(p, &spec);
@@ -608,6 +660,29 @@ pub fn add(
         doc.set_dependency(&name, &spec);
         added.push(name);
     }
+    // Known build-time environment variables are offered before anything is built
+    // (requirements chapter 7); those declined are suggested again at the end.
+    let mut declined = Vec::new();
+    let suggested = ops::env_suggestions(&Manifest::parse(&doc.to_string())?);
+    for e in suggested.into_iter().filter(|e| added.contains(&e.package)) {
+        let question = format!(
+            "Set {} for {} in rok.toml? With {}, {}.",
+            e.variables(),
+            e.package,
+            if e.env.len() == 1 { "it" } else { "them" },
+            e.why
+        );
+        if ui.offer(&format!("env-{}", e.package), &question, true)? {
+            let mut spec = Manifest::parse(&doc.to_string())?
+                .dependency(&e.package)
+                .expect("added above")
+                .clone();
+            spec.env.extend(e.env);
+            doc.set_dependency(&e.package, &spec);
+        } else {
+            declined.push(e);
+        }
+    }
     let new_text = doc.to_string();
     let new_manifest = Manifest::parse(&new_text)?;
     let lock = apply(
@@ -637,12 +712,12 @@ pub fn add(
             mixed.join(", ")
         ));
     }
-    suggest_env(
-        ui,
-        ops::env_suggestions(&new_manifest)
-            .iter()
-            .filter(|e| added.contains(&e.package)),
-    );
+    if let Some((alias, url, true)) = &from_repo {
+        ui.info(&format!(
+            "Declared the repository `{alias}` ({url}) in rok.toml's [repositories]."
+        ));
+    }
+    suggest_env(ui, declined.iter());
     Ok(())
 }
 

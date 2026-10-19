@@ -16,4 +16,4 @@ Encoding: UTF-8
 Depends: R (>= 4.0.0)
 Imports: tools, utils
 Config/roxygen2/markdown: TRUE
-Config/roxygen2/version: 8.1.0
+Config/roxygen2/version: 8.1.1

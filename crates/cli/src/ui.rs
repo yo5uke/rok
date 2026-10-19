@@ -21,6 +21,8 @@ pub struct Ui {
     pub json: bool,
     /// Questions already answered yes, by id (`--confirmed`, used by the R package).
     confirmed: Vec<String>,
+    /// Optional questions answered no, by id (`--declined`, used by the R package).
+    declined: Vec<String>,
     /// Where messages and events go instead of stderr (`--events`, used by the R package).
     events: Option<Mutex<File>>,
 }
@@ -28,11 +30,13 @@ pub struct Ui {
 /// A question that someone must answer, raised when rok runs for a program: with `--json` and
 /// no terminal, as the R package calls it. Nothing has been changed yet. The program asks the
 /// question, then runs rok again with `--confirmed <id>` (yes/no) or `<flag> <value>` (a choice).
+/// No to an `optional` question is `--declined <id>`; no to another one cancels the command.
 #[derive(Debug)]
 pub struct NeedsAnswer {
     pub id: String,
     pub question: String,
     pub default: bool,
+    pub optional: bool,
     /// For a choice: (value, label) of each option, and the flag that passes the value.
     pub options: Vec<(String, String)>,
     pub flag: Option<String>,
@@ -53,6 +57,9 @@ impl NeedsAnswer {
             "question": self.question,
             "default": self.default,
         });
+        if self.optional {
+            needs["optional"] = true.into();
+        }
         if let Some(flag) = &self.flag {
             needs["flag"] = flag.as_str().into();
             needs["options"] = self
@@ -79,6 +86,7 @@ impl Ui {
         yes: bool,
         json: bool,
         confirmed: Vec<String>,
+        declined: Vec<String>,
         events: Option<&Path>,
     ) -> std::io::Result<Ui> {
         let no_color = std::env::var_os("NO_COLOR").is_some_and(|v| !v.is_empty());
@@ -93,6 +101,7 @@ impl Ui {
             yes,
             json,
             confirmed,
+            declined,
             events,
         })
     }
@@ -244,6 +253,7 @@ impl Ui {
                     id: id.to_string(),
                     question: question.to_string(),
                     default,
+                    optional: false,
                     options: Vec::new(),
                     flag: None,
                 }
@@ -253,6 +263,39 @@ impl Ui {
                 "{question}\nThis needs confirmation; run again with `--yes` to proceed."
             );
         }
+        self.prompt(question, default)
+    }
+
+    /// Asks a yes/no question whose no answer lets the command go on (unlike [`Ui::confirm`]).
+    /// With `--yes` (or `--confirmed <id>`) the answer is yes, with `--declined <id>` no. For a
+    /// program (`--json`) without a terminal, the question is returned as an optional
+    /// [`NeedsAnswer`]; with neither, no one can answer, and the answer is no.
+    pub fn offer(&self, id: &str, question: &str, default: bool) -> anyhow::Result<bool> {
+        if self.yes || self.confirmed.iter().any(|c| c == id) {
+            return Ok(true);
+        }
+        if self.declined.iter().any(|c| c == id) {
+            return Ok(false);
+        }
+        if !std::io::stdin().is_terminal() {
+            if self.json {
+                return Err(NeedsAnswer {
+                    id: id.to_string(),
+                    question: question.to_string(),
+                    default,
+                    optional: true,
+                    options: Vec::new(),
+                    flag: None,
+                }
+                .into());
+            }
+            return Ok(false);
+        }
+        self.prompt(question, default)
+    }
+
+    /// Asks on the terminal.
+    fn prompt(&self, question: &str, default: bool) -> anyhow::Result<bool> {
         let hint = if default { "[Y/n]" } else { "[y/N]" };
         let _ = write!(
             std::io::stderr(),
@@ -288,6 +331,7 @@ impl Ui {
                     id: id.to_string(),
                     question: question.to_string(),
                     default: true,
+                    optional: false,
                     options: options.to_vec(),
                     flag: Some(flag.to_string()),
                 }

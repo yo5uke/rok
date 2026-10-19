@@ -6,6 +6,8 @@
 \alias{rok-package}
 \title{rok: Fast Package and Project Manager}
 \description{
+\if{html}{\figure{logo.png}{options: style='float: right' alt='logo' width='120'}}
+
 Manages the packages and the R version of a project. Packages are resolved from dated snapshots of the 'Posit Package Manager' \url{https://packagemanager.posit.co} and recorded in a lockfile, so that a project can be reproduced as it was. The work is done by the 'rok' command-line program, which this package downloads from the project's GitHub releases on first use, after asking for user consent.
 }
 \details{

@@ -139,19 +139,40 @@ fn github_and_repository_packages() {
     assert!(read("rok.toml").contains(r#"praise = { github = "gaborcsardi/praise" }"#));
     assert!(read("rok.lock").contains(r#"source = { github = "gaborcsardi/praise", commit = ""#));
 
-    // A package from a CRAN-like repository: the URL and its Git origin are locked.
-    let mut manifest = read("rok.toml");
-    manifest.push_str(
-        "rcheology = { repo = \"multiverse\" }\n\n[repositories]\nmultiverse = \"https://community.r-multiverse.org\"\n",
-    );
-    std::fs::write(proj.join("rok.toml"), manifest).unwrap();
-    let synced = json(&rok(&proj, &["sync", "--yes", "--json"]));
-    assert_eq!(synced["changes"][0]["name"], "rcheology");
+    // A package from a CRAN-like repository, by its URL: the repository is declared under a
+    // name, and the URL and its Git origin are locked.
+    let added = json(&rok(
+        &proj,
+        &[
+            "add",
+            "rcheology",
+            "--repo",
+            "https://community.r-multiverse.org/",
+            "--yes",
+            "--json",
+        ],
+    ));
+    assert_eq!(added["changes"][0]["name"], "rcheology");
+    assert!(read("rok.toml").contains(r#"rcheology = { repo = "multiverse" }"#));
+    assert!(read("rok.toml").contains(r#"multiverse = "https://community.r-multiverse.org""#));
     assert!(read("rok.lock").contains(
         r#"repository = "multiverse", url = "https://community.r-multiverse.org", remote-url = ""#
     ));
     assert!(rok(&proj, &["sync", "--locked"]).status.success());
     assert!(rok(&proj, &["status", "--check"]).status.success());
+
+    // CRAN's own URL means CRAN.
+    json(&rok(
+        &proj,
+        &[
+            "add",
+            "R6",
+            "--repo",
+            "https://cloud.r-project.org",
+            "--json",
+        ],
+    ));
+    assert!(read("rok.toml").contains("R6 = \"*\""));
 
     // GitHub packages can be named by their repository.
     let removed = json(&rok(&proj, &["remove", "gaborcsardi/praise", "--json"]));

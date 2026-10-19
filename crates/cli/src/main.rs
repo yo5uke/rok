@@ -29,6 +29,9 @@ struct Cli {
     /// Answer yes to the question with this id (used by the R package after asking).
     #[arg(long, global = true, value_name = "ID", hide = true)]
     confirmed: Vec<String>,
+    /// Answer no to the optional question with this id (used by the R package after asking).
+    #[arg(long, global = true, value_name = "ID", hide = true)]
+    declined: Vec<String>,
     /// Write messages, progress, the process id and the exit status to this file (used by the
     /// R package, which runs rok in the background and draws the progress itself).
     #[arg(long, global = true, value_name = "FILE", hide = true)]
@@ -61,6 +64,10 @@ enum Command {
         /// Take these packages from the latest snapshot, keeping the project's snapshot.
         #[arg(long)]
         latest: bool,
+        /// Take these packages from the CRAN-like repository at this URL, such as
+        /// https://community.r-multiverse.org.
+        #[arg(long, value_name = "URL")]
+        repo: Option<String>,
     },
     /// Remove packages from rok.toml, then update rok.lock and the library.
     Remove {
@@ -232,7 +239,13 @@ enum RCommand {
 fn main() -> ExitCode {
     let cli = Cli::parse();
     let events = cli.events.is_some();
-    let ui = match ui::Ui::new(cli.yes, cli.json, cli.confirmed, cli.events.as_deref()) {
+    let ui = match ui::Ui::new(
+        cli.yes,
+        cli.json,
+        cli.confirmed,
+        cli.declined,
+        cli.events.as_deref(),
+    ) {
         Ok(ui) => ui,
         Err(e) => {
             eprintln!("✖ Could not write to the events file: {e}");
@@ -249,7 +262,8 @@ fn main() -> ExitCode {
             packages,
             version,
             latest,
-        } => commands::add(&ui, project, &packages, version, latest),
+            repo,
+        } => commands::add(&ui, project, &packages, version, latest, repo),
         Command::Remove { packages } => commands::remove(&ui, project, &packages),
         Command::Sync { locked } => commands::sync(&ui, project, locked),
         Command::Update {

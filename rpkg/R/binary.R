@@ -235,9 +235,13 @@ process_alive <- function(pid) {
   }
 }
 
-# Asks a question the binary handed back, and returns the arguments that answer it.
+# Asks a question the binary handed back, and returns the arguments that answer it. No to an
+# optional question lets the command go on (`--declined`); without anyone to ask, that is the
+# answer.
 ask <- function(needs) {
   yes <- isTRUE(getOption("rok.yes"))
+  optional <- isTRUE(needs$optional)
+  if (optional && !yes && !interactive()) return(c("--declined", needs$id))
   if (!yes && !interactive()) {
     stop(needs$question, "\n",
       "\u2139 This needs an answer. Run it in an interactive session, ",
@@ -253,6 +257,7 @@ ask <- function(needs) {
     return(c(needs$flag, values[[pick]]))
   }
   answer <- if (yes) TRUE else ask_yes_no(needs$question, default = isTRUE(needs$default))
+  if (optional && identical(answer, FALSE)) return(c("--declined", needs$id))
   if (!isTRUE(answer)) stop("Cancelled. Nothing was changed.", call. = FALSE)
   c("--confirmed", needs$id)
 }

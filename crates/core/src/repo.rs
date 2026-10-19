@@ -166,9 +166,118 @@ pub fn remote_of(package_dir: &Path) -> Option<Remote> {
     })
 }
 
+/// The host of an http(s) URL, in lower case and without a port.
+fn host(url: &str) -> Option<String> {
+    let rest = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))?;
+    let host = rest.split(['/', '?', '#']).next()?;
+    let host = host.rsplit('@').next()?.split(':').next()?;
+    (!host.is_empty()).then(|| host.to_ascii_lowercase())
+}
+
+/// Whether `url` is CRAN: its main site and mirrors (`cran.*`), or a CRAN repository of a
+/// Posit Package Manager (`p3m_cran` is the one rok uses, `<server>/cran`).
+pub fn is_cran_url(url: &str, p3m_cran: &str) -> bool {
+    let Some(h) = host(url) else {
+        return false;
+    };
+    let path = url.splitn(4, '/').nth(3).unwrap_or("");
+    h.starts_with("cran.")
+        || h == "cloud.r-project.org"
+        || (matches!(
+            h.as_str(),
+            "packagemanager.posit.co" | "packagemanager.rstudio.com"
+        ) && (path == "cran" || path.starts_with("cran/")))
+        || url.trim_end_matches('/') == p3m_cran
+        || url.starts_with(&format!("{p3m_cran}/"))
+}
+
+/// A name for the repository at `url` in `[repositories]`: the universe for r-universe
+/// (`ropensci` for `https://ropensci.r-universe.dev`), `multiverse` for R-multiverse's
+/// Community repository, or else the host. `taken` holds the names already declared (name →
+/// URL); a taken name gets a number.
+pub fn alias_for(url: &str, taken: &std::collections::BTreeMap<String, String>) -> String {
+    let h = host(url).unwrap_or_else(|| "repo".to_string());
+    let base = if let Some(universe) = h.strip_suffix(".r-universe.dev") {
+        universe.to_string()
+    } else if h == "community.r-multiverse.org" {
+        "multiverse".to_string()
+    } else {
+        h
+    };
+    let free = |name: &str| name != "cran" && !taken.contains_key(name);
+    if free(&base) {
+        return base;
+    }
+    (2..)
+        .map(|n| format!("{base}-{n}"))
+        .find(|name| free(name))
+        .expect("a free name")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recognizes_cran_urls() {
+        let p3m = "https://packagemanager.posit.co/cran";
+        for url in [
+            "https://cloud.r-project.org",
+            "https://cran.r-project.org/",
+            "https://cran.rstudio.com",
+            "https://cran.ism.ac.jp/",
+            "https://packagemanager.posit.co/cran/latest",
+            "https://packagemanager.posit.co/cran/__linux__/noble/2026-10-01",
+            "https://p3m.example.org/cran/2026-10-01",
+        ] {
+            assert!(
+                is_cran_url(
+                    url,
+                    if url.contains("example") {
+                        "https://p3m.example.org/cran"
+                    } else {
+                        p3m
+                    }
+                ),
+                "{url}"
+            );
+        }
+        for url in [
+            "https://community.r-multiverse.org",
+            "https://ropensci.r-universe.dev",
+            "https://packagemanager.posit.co/bioconductor",
+            "not a url",
+        ] {
+            assert!(!is_cran_url(url, p3m), "{url}");
+        }
+    }
+
+    #[test]
+    fn names_repositories() {
+        let none = std::collections::BTreeMap::new();
+        assert_eq!(
+            alias_for("https://ropensci.r-universe.dev/", &none),
+            "ropensci"
+        );
+        assert_eq!(
+            alias_for("https://community.r-multiverse.org", &none),
+            "multiverse"
+        );
+        assert_eq!(
+            alias_for("https://Repo.Example.org:8080/r", &none),
+            "repo.example.org"
+        );
+        let taken = std::collections::BTreeMap::from([
+            ("multiverse".to_string(), "https://other.org".to_string()),
+            ("multiverse-2".to_string(), "https://other2.org".to_string()),
+        ]);
+        assert_eq!(
+            alias_for("https://community.r-multiverse.org", &taken),
+            "multiverse-3"
+        );
+    }
 
     #[test]
     fn builds_urls() {

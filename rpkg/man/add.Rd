@@ -4,7 +4,7 @@
 \alias{add}
 \title{Add packages}
 \usage{
-add(..., version = NULL, latest = FALSE, project = ".")
+add(..., version = NULL, latest = FALSE, repo = NULL, project = ".")
 }
 \arguments{
 \item{...}{Package names or GitHub repositories.}
@@ -12,6 +12,9 @@ add(..., version = NULL, latest = FALSE, project = ".")
 \item{version}{A version constraint for one package, such as \code{"< 0.13"}.}
 
 \item{latest}{Take the packages from the latest snapshot, keeping the project's snapshot.}
+
+\item{repo}{The URL of one CRAN-like repository to take the packages from, such as
+\code{"https://community.r-multiverse.org"}. CRAN's own URL means CRAN.}
 
 \item{project}{A directory of the project (default: the working directory).}
 }
@@ -21,7 +24,12 @@ The result (the changes), invisibly.
 \description{
 Declares packages in \code{rok.toml}, then updates \code{rok.lock} and the project library. Accepts
 the same forms as pak: \code{"fixest"} from CRAN, \code{"owner/repo"} and \code{"owner/repo@ref"} from
-GitHub.
+GitHub. With \code{repo}, the packages come from that CRAN-like repository (such as R-multiverse
+or an r-universe), which is declared in \code{rok.toml} if it is not yet.
+}
+\details{
+Some packages build from source better with known environment variables (such as
+\code{NOT_CRAN = "true"} for polars). Adding them is offered before anything is installed.
 }
 \examples{
 \dontshow{if (interactive() && rok_available()) withAutoprint(\{ # examplesIf}
@@ -32,5 +40,8 @@ add("jsonlite", version = ">= 1.8", project = dir)
 
 # GitHub packages, optionally at a tag, branch or commit
 add("gaborcsardi/praise", project = dir)
+
+# A package from a CRAN-like repository
+add("polars", repo = "https://community.r-multiverse.org", project = dir)
 \dontshow{\}) # examplesIf}
 }
