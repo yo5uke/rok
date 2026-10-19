@@ -1130,6 +1130,49 @@ pub struct ScanFindings {
     pub undeclared: Vec<(String, String)>,
     /// Declared packages the code never uses (they may still be needed in other ways).
     pub unused: Vec<String>,
+    /// Build-time environment variables suggested for declared packages.
+    pub env: Vec<EnvSuggestion>,
+}
+
+/// Environment variables a declared package does not set but the built-in rules suggest.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EnvSuggestion {
+    pub package: String,
+    pub env: BTreeMap<String, String>,
+    /// What they do.
+    pub why: String,
+}
+
+impl EnvSuggestion {
+    /// The variables as rok.toml writes them: `NOT_CRAN = "true"`.
+    pub fn variables(&self) -> String {
+        self.env
+            .iter()
+            .map(|(k, v)| format!("{k} = {v:?}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+}
+
+/// The environment variables the built-in rules suggest for the declared packages, leaving out
+/// those the declarations already set (to any value). Uses only the manifest.
+pub fn env_suggestions(manifest: &Manifest) -> Vec<EnvSuggestion> {
+    scan::builtin_env_rules()
+        .into_iter()
+        .filter_map(|rule| {
+            let spec = manifest.dependency(&rule.package)?;
+            let env: BTreeMap<String, String> = rule
+                .env
+                .into_iter()
+                .filter(|(k, _)| !spec.env.contains_key(k))
+                .collect();
+            (!env.is_empty()).then_some(EnvSuggestion {
+                package: rule.package,
+                env,
+                why: rule.why,
+            })
+        })
+        .collect()
 }
 
 /// Scans the project's code and compares it with the declarations. Packages that are part of
@@ -1170,7 +1213,15 @@ pub fn scan_findings(
         .filter(|n| !report.needs(n))
         .collect();
     unused.sort_by(|a, b| name_order(a, b));
-    Ok((report, ScanFindings { undeclared, unused }))
+    let env = env_suggestions(manifest);
+    Ok((
+        report,
+        ScanFindings {
+            undeclared,
+            unused,
+            env,
+        },
+    ))
 }
 
 pub fn plural(n: usize) -> &'static str {
@@ -1190,6 +1241,26 @@ mod tests {
             executable: PathBuf::from("R"),
             kind,
         }
+    }
+
+    #[test]
+    fn suggests_build_variables_the_declarations_do_not_set() {
+        let m = |deps: &str| {
+            Manifest::parse(&format!(
+                "[project]\nname = \"p\"\nr = \"4.6\"\nsnapshot = \"2026-10-01\"\n\
+                 [repositories]\nmultiverse = \"https://community.r-multiverse.org\"\n\
+                 [dependencies]\n{deps}\n"
+            ))
+            .unwrap()
+        };
+        let found = env_suggestions(&m("polars = { repo = \"multiverse\" }"));
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].package, "polars");
+        assert_eq!(found[0].variables(), "NOT_CRAN = \"true\"");
+        // A value the person chose, even another one, is left alone.
+        let chosen = "polars = { repo = \"multiverse\", env = { NOT_CRAN = \"false\" } }";
+        assert!(env_suggestions(&m(chosen)).is_empty());
+        assert!(env_suggestions(&m("fixest = \"*\"")).is_empty());
     }
 
     #[test]

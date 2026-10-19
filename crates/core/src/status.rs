@@ -361,6 +361,25 @@ pub fn check(inputs: &Inputs) -> Vec<Problem> {
                 )),
             });
         }
+        if !f.env.is_empty() {
+            let n = f.env.len();
+            problems.push(Problem {
+                level: Level::Info,
+                code: "env-suggested",
+                message: format!(
+                    "Build-time environment variables are suggested for {n} declared package{}.",
+                    ops::plural(n)
+                ),
+                details: f
+                    .env
+                    .iter()
+                    .map(|e| format!("{}: {} ({})", e.package, e.variables(), e.why))
+                    .collect(),
+                fix: Some(
+                    "Add them to the package's `env` in rok.toml, then run `rok sync`.".to_string(),
+                ),
+            });
+        }
     }
 
     // 6. Information.
@@ -742,6 +761,11 @@ mod tests {
         let findings = ops::ScanFindings {
             undeclared: vec![("sf".into(), "for geom_sf() in a.R:3".into())],
             unused: vec!["fixest".into()],
+            env: vec![ops::EnvSuggestion {
+                package: "polars".into(),
+                env: BTreeMap::from([("NOT_CRAN".into(), "true".into())]),
+                why: "faster".into(),
+            }],
         };
         let (m, l, r) = (manifest("fixest = \"*\""), lock(), r("4.6.1"));
         let problems = check(&Inputs {
@@ -752,7 +776,14 @@ mod tests {
             system: None,
             scan: Some(&findings),
         });
-        assert_eq!(codes(&problems), ["undeclared", "unused", "mixed-dates"]);
+        assert_eq!(
+            codes(&problems),
+            ["undeclared", "unused", "env-suggested", "mixed-dates"]
+        );
+        assert_eq!(
+            problems[2].details,
+            ["polars: NOT_CRAN = \"true\" (faster)"]
+        );
         assert!(problems.iter().all(|p| p.level == Level::Info));
         assert_eq!(problems[0].details, ["sf (for geom_sf() in a.R:3)"]);
         assert_eq!(

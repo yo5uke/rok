@@ -47,3 +47,12 @@ suggest = ["svglite"]
 [[rule]]
 when = { call = "modelsummary", arg = "output", value = ["gt", "flextable", "kableExtra", "huxtable"] }
 suggest_value = true
+
+# Build-time environment variables for declared packages (requirements chapter 7). When a
+# declared package does not set one of them in its `env`, adding it is suggested (never done by
+# itself). `why` says what they do.
+
+[[env]]
+package = "polars"
+env = { NOT_CRAN = "true" }
+why = "a source build downloads polars' prebuilt Rust library instead of compiling it"

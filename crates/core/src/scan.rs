@@ -491,25 +491,49 @@ impl Rule {
     }
 }
 
+/// A rule for a declared package: building it from source goes better with these environment
+/// variables (requirements chapter 7).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct EnvRule {
+    pub package: String,
+    pub env: BTreeMap<String, String>,
+    /// What the variables do.
+    pub why: String,
+}
+
+/// `scan_rules.toml`.
+#[derive(Deserialize)]
+struct BuiltinRules {
+    rule: Vec<RuleEntry>,
+    #[serde(default)]
+    env: Vec<EnvRule>,
+}
+
+#[derive(Deserialize)]
+struct RuleEntry {
+    when: toml::Table,
+    #[serde(default)]
+    suggest: Vec<String>,
+    #[serde(default)]
+    suggest_value: bool,
+}
+
+fn builtin() -> BuiltinRules {
+    toml::from_str(include_str!("scan_rules.toml")).expect("valid built-in rules")
+}
+
 /// The rules that come with rok.
 pub fn builtin_rules() -> Vec<Rule> {
-    #[derive(Deserialize)]
-    struct File {
-        rule: Vec<Entry>,
-    }
-    #[derive(Deserialize)]
-    struct Entry {
-        when: toml::Table,
-        #[serde(default)]
-        suggest: Vec<String>,
-        #[serde(default)]
-        suggest_value: bool,
-    }
-    let file: File = toml::from_str(include_str!("scan_rules.toml")).expect("valid built-in rules");
-    file.rule
+    builtin()
+        .rule
         .into_iter()
         .map(|e| Rule::new(&e.when, e.suggest, e.suggest_value).expect("valid built-in rule"))
         .collect()
+}
+
+/// The environment variable rules that come with rok.
+pub fn builtin_env_rules() -> Vec<EnvRule> {
+    builtin().env
 }
 
 /// The built-in rules followed by the project's own.

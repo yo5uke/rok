@@ -336,7 +336,7 @@ fn suggest_new(ui: &Ui, root: &Path, manifest: &Manifest, lock: Option<&Lockfile
             .into_iter()
             .filter(|(n, _)| new.contains(n))
             .collect(),
-        unused: Vec::new(),
+        ..Default::default()
     };
     suggest_undeclared(ui, &shown, "rok::add");
 }

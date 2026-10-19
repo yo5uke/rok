@@ -568,6 +568,7 @@ pub fn add(
             .map(|d| d.env.clone())
             .unwrap_or_default()
     };
+    let mut added = cran.clone();
     for p in &cran {
         let spec = DependencySpec {
             source: DependencySource::Cran {
@@ -605,6 +606,7 @@ pub fn add(
             env: env_of(&name),
         };
         doc.set_dependency(&name, &spec);
+        added.push(name);
     }
     let new_text = doc.to_string();
     let new_manifest = Manifest::parse(&new_text)?;
@@ -635,7 +637,30 @@ pub fn add(
             mixed.join(", ")
         ));
     }
+    suggest_env(
+        ui,
+        ops::env_suggestions(&new_manifest)
+            .iter()
+            .filter(|e| added.contains(&e.package)),
+    );
     Ok(())
+}
+
+/// Suggests build-time environment variables for declared packages (requirements chapter 7).
+/// Nothing is written: they change how the package is built.
+fn suggest_env<'a>(ui: &Ui, suggestions: impl Iterator<Item = &'a ops::EnvSuggestion>) {
+    for e in suggestions {
+        ui.info(&format!(
+            "Consider setting {} for {} in rok.toml: {}.",
+            e.variables(),
+            e.package,
+            e.why
+        ));
+        ui.bullet(&format!(
+            "Add `env = {{ {} }}` to its declaration, then run `rok sync`.",
+            e.variables()
+        ));
+    }
 }
 
 /// The declared package a command-line name refers to: `owner/repo` names a GitHub package.
