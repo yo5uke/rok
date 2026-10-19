@@ -203,6 +203,68 @@ fn runs_scripts_with_the_project_library() {
 
 #[test]
 #[ignore = "needs the network and R"]
+fn records_unmanaged_packages_installed_later() {
+    let t = tempfile::tempdir().unwrap();
+    let home = t.path();
+    json(&rok(home, &["init", "proj", "--json"]));
+    let proj = home.join("proj");
+    let manifest = proj.join("rok.toml");
+    let text = std::fs::read_to_string(&manifest).unwrap();
+    std::fs::write(&manifest, text + "\n[unmanaged]\npackages = [\"mypkg\"]\n").unwrap();
+    json(&rok(&proj, &["sync", "--json"]));
+    let lock = || std::fs::read_to_string(proj.join("rok.lock")).unwrap();
+    assert!(!lock().contains("name = \"mypkg\""));
+
+    // The person installs it (as BiocManager::install() would) after rok.lock was written.
+    let lib = std::fs::read_dir(proj.join(".rok/library"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let lib = std::fs::read_dir(&lib)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let install = |version: &str| {
+        std::fs::create_dir_all(lib.join("mypkg")).unwrap();
+        std::fs::write(
+            lib.join("mypkg/DESCRIPTION"),
+            format!("Package: mypkg\nVersion: {version}\n"),
+        )
+        .unwrap();
+    };
+    install("1.0");
+    let status = rok(&proj, &["status", "--check"]);
+    assert!(!status.status.success());
+    let text = unix_text(&status.stderr);
+    assert!(
+        text.contains("mypkg 1.0 is installed but not recorded in rok.lock"),
+        "{text}"
+    );
+    assert!(!rok(&proj, &["sync", "--locked"]).status.success());
+
+    // sync records it, and records an update.
+    json(&rok(&proj, &["sync", "--json"]));
+    assert!(
+        lock().contains("name = \"mypkg\"\nversion = \"1.0\""),
+        "{}",
+        lock()
+    );
+    assert!(rok(&proj, &["status", "--check"]).status.success());
+    install("1.1");
+    json(&rok(&proj, &["sync", "--json"]));
+    assert!(
+        lock().contains("name = \"mypkg\"\nversion = \"1.1\""),
+        "{}",
+        lock()
+    );
+}
+
+#[test]
+#[ignore = "needs the network and R"]
 fn hands_questions_back_to_programs() {
     let t = tempfile::tempdir().unwrap();
     let home = t.path();

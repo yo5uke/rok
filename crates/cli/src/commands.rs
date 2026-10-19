@@ -903,16 +903,33 @@ fn sync_project(
 ) -> anyhow::Result<(Lockfile, Vec<ops::Change>, ops::SyncReport)> {
     // A newer rok may have a newer startup hook.
     project.refresh_activate()?;
-    let current = old_lock
+    let declared = old_lock
         .as_ref()
         .filter(|l| ops::lock_is_current(manifest, l));
+    // Unmanaged packages installed or updated since rok.lock was written are recorded too.
+    let unrecorded = declared
+        .map(|l| ops::unrecorded_unmanaged_in(env, &project.root, manifest, l))
+        .unwrap_or_default();
+    let current = declared.filter(|_| unrecorded.is_empty());
     let (mut lock, changes, relocked) = match current {
         Some(l) => (l.clone(), Vec::new(), false),
+        None if locked && declared.is_some() => bail!(
+            "rok.lock does not record the installed unmanaged packages, and `--locked` was given:\n  • {}\nRun `rok sync` without `--locked` to record them.",
+            unrecorded
+                .iter()
+                .map(|u| u.to_string())
+                .collect::<Vec<_>>()
+                .join("\n  • ")
+        ),
         None if locked => bail!(
             "rok.lock is out of date with rok.toml, and `--locked` was given.\nRun `rok sync` without `--locked` to update rok.lock."
         ),
         None => {
-            ui.step("rok.toml changed; resolving dependencies");
+            ui.step(if declared.is_some() {
+                "Unmanaged packages changed; resolving dependencies"
+            } else {
+                "rok.toml changed; resolving dependencies"
+            });
             let lock_r = old_lock
                 .as_ref()
                 .filter(|l| l.r.minor() == r.version.minor())

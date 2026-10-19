@@ -234,6 +234,73 @@ pub fn lock_is_current(manifest: &Manifest, lock: &Lockfile) -> bool {
         })
 }
 
+/// An unmanaged package whose installed version rok.lock does not record (requirements
+/// chapter 7: rok.lock records their versions).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnrecordedUnmanaged {
+    pub name: String,
+    pub installed: Version,
+    /// The version rok.lock records, if any.
+    pub locked: Option<Version>,
+}
+
+impl std::fmt::Display for UnrecordedUnmanaged {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.locked {
+            Some(v) => write!(
+                f,
+                "{} {} is installed, but rok.lock records {v}",
+                self.name, self.installed
+            ),
+            None => write!(
+                f,
+                "{} {} is installed but not recorded in rok.lock",
+                self.name, self.installed
+            ),
+        }
+    }
+}
+
+/// The `[unmanaged]` packages whose installed version (`installed`) rok.lock does not record:
+/// installed after rok.lock was written, or updated since. Packages that are not installed are
+/// left out (rok.lock keeps what it recorded).
+pub fn unrecorded_unmanaged(
+    manifest: &Manifest,
+    lock: &Lockfile,
+    installed: impl Fn(&str) -> Option<Version>,
+) -> Vec<UnrecordedUnmanaged> {
+    manifest
+        .unmanaged
+        .iter()
+        .filter_map(|name| {
+            let installed = installed(name)?;
+            let locked = lock.package(name).map(|p| p.version.clone());
+            (locked.as_ref() != Some(&installed)).then(|| UnrecordedUnmanaged {
+                name: name.clone(),
+                installed,
+                locked,
+            })
+        })
+        .collect()
+}
+
+/// [`unrecorded_unmanaged`] for the project in `root`, from the library that resolving reads.
+pub fn unrecorded_unmanaged_in(
+    env: &Env,
+    root: &Path,
+    manifest: &Manifest,
+    lock: &Lockfile,
+) -> Vec<UnrecordedUnmanaged> {
+    if manifest.unmanaged.is_empty() {
+        return Vec::new();
+    }
+    let (minor, _) = manifest_r(manifest);
+    let library = crate::project::Project::new(root).library(&minor, &env.platform);
+    unrecorded_unmanaged(manifest, lock, |name| {
+        installed_entry(&library, name).map(|e| e.version)
+    })
+}
+
 /// How much of the old lockfile a resolution keeps.
 #[derive(Debug, Clone, Default)]
 pub struct Keep {
@@ -1241,6 +1308,44 @@ mod tests {
             executable: PathBuf::from("R"),
             kind,
         }
+    }
+
+    #[test]
+    fn finds_unmanaged_packages_rok_lock_does_not_record() {
+        let m = Manifest::parse(
+            "[project]\nname = \"p\"\nr = \"4.6\"\nsnapshot = \"2026-10-01\"\n\
+             [unmanaged]\npackages = [\"limma\", \"DESeq2\", \"edgeR\"]\n",
+        )
+        .unwrap();
+        let mut l = lock(&[]);
+        l.packages.push(LockedPackage {
+            name: "limma".into(),
+            version: "3.60.0".parse().unwrap(),
+            source: Source::Unmanaged,
+            dependencies: Vec::new(),
+            sha256: None,
+            env: BTreeMap::new(),
+            sysreqs: BTreeMap::new(),
+        });
+        // limma was updated, DESeq2 installed later; edgeR is not installed.
+        let installed = |name: &str| match name {
+            "limma" => Some("3.62.0".parse().unwrap()),
+            "DESeq2" => Some("1.46.0".parse().unwrap()),
+            _ => None,
+        };
+        let found: Vec<String> = unrecorded_unmanaged(&m, &l, installed)
+            .iter()
+            .map(|u| u.to_string())
+            .collect();
+        assert_eq!(
+            found,
+            [
+                "limma 3.62.0 is installed, but rok.lock records 3.60.0",
+                "DESeq2 1.46.0 is installed but not recorded in rok.lock"
+            ]
+        );
+        let recorded = |name: &str| (name == "limma").then(|| "3.60.0".parse().unwrap());
+        assert!(unrecorded_unmanaged(&m, &l, recorded).is_empty());
     }
 
     #[test]

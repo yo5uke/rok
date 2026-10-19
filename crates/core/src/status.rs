@@ -232,6 +232,13 @@ pub fn check(inputs: &Inputs) -> Vec<Problem> {
                 details.push(format!("{name} is installed but not in rok.lock"));
             }
         }
+        // Unmanaged packages installed or updated since: `rok sync` records them.
+        let installed = |name: &str| library.get(name).and_then(|i| i.version().cloned());
+        details.extend(
+            ops::unrecorded_unmanaged(manifest, l, installed)
+                .iter()
+                .map(|u| u.to_string()),
+        );
         if !details.is_empty() {
             problems.push(Problem {
                 level: Level::Warning,
@@ -816,12 +823,19 @@ mod tests {
                 },
             ),
             ("mine".to_string(), Installed::Other { version: None }),
+            (
+                "edgeR".to_string(),
+                Installed::Other {
+                    version: Some("4.4.0".parse().unwrap()),
+                },
+            ),
         ]);
-        // limma is unmanaged and recorded in rok.lock; DESeq2 is unmanaged but not installed.
-        let unmanaged = "[unmanaged]\npackages = [\"limma\", \"DESeq2\"]\n";
+        // Unmanaged: limma is recorded in rok.lock, edgeR was installed after rok.lock was
+        // written, DESeq2 is not installed.
+        let unmanaged = "[unmanaged]\npackages = [\"limma\", \"DESeq2\", \"edgeR\"]\n";
         let m = manifest(&format!("fixest = \"*\"\nsf = \"*\"\n{unmanaged}"));
         let mut l = lock();
-        l.manifest.unmanaged = vec!["DESeq2".into(), "limma".into()];
+        l.manifest.unmanaged = vec!["DESeq2".into(), "edgeR".into(), "limma".into()];
         l.packages.push(LockedPackage {
             name: "limma".into(),
             version: "3.60.0".parse().unwrap(),
@@ -857,11 +871,12 @@ mod tests {
             [
                 "fixest 0.12.1: the link to the cache is broken",
                 "Rcpp 1.1.2 is not installed",
-                "old is installed but not in rok.lock"
+                "old is installed but not in rok.lock",
+                "edgeR 4.4.0 is installed but not recorded in rok.lock"
             ]
         );
         assert_eq!(problems[3].details, ["DESeq2"]);
-        assert_eq!(problems[5].details, ["limma 3.60.0"]);
+        assert_eq!(problems[5].details, ["edgeR 4.4.0", "limma 3.60.0"]);
         assert_eq!(problems[6].details, ["mine"]);
     }
 

@@ -103,9 +103,14 @@ pub fn activate(
             r.version, l.r
         ));
     }
-    let current = old_lock
+    let declared = old_lock
         .as_ref()
         .filter(|l| ops::lock_is_current(&manifest, l));
+    // Unmanaged packages installed or updated since rok.lock was written are recorded too.
+    let unrecorded = declared.is_some_and(|l| {
+        !ops::unrecorded_unmanaged_in(&env, &project.root, &manifest, l).is_empty()
+    });
+    let current = declared.filter(|_| !unrecorded);
 
     // In sync? This is the path taken at almost every start, so it uses no network.
     if let Some(l) = current
@@ -134,8 +139,10 @@ pub fn activate(
         return Ok(ExitCode::SUCCESS);
     }
 
-    let what = if current.is_none() {
+    let what = if declared.is_none() {
         "rok.toml has changed since rok.lock was written"
+    } else if unrecorded {
+        "unmanaged packages have changed since rok.lock was written"
     } else {
         "the library does not match rok.lock"
     };
@@ -166,7 +173,12 @@ pub fn activate(
         Some(l) => (l.clone(), Vec::new(), false),
         None => {
             ui.step(&format!(
-                "rok: {name}: rok.toml changed; resolving dependencies"
+                "rok: {name}: {} changed; resolving dependencies",
+                if unrecorded {
+                    "unmanaged packages"
+                } else {
+                    "rok.toml"
+                }
             ));
             let lock_r = old_lock
                 .as_ref()
