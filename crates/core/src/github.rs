@@ -1,9 +1,12 @@
 //! GitHub: resolving references to commits, reading DESCRIPTION, downloading sources.
 //!
-//! The REST API is used only where needed (resolving a reference, comparing commits), because
-//! without a token it allows 60 requests an hour. Files come from raw.githubusercontent.com and
-//! codeload.github.com, which do not count against that limit. A token is read from
-//! `GITHUB_PAT`, `GITHUB_TOKEN` or `GH_TOKEN`, as pak does; it is sent only to GitHub.
+//! GitHub's REST API allows 60 requests an hour without a token, and the limit can be used up
+//! by others on the same address (as on CI runners). So references are resolved from the list
+//! that Git itself reads (`git ls-remote`), files come from raw.githubusercontent.com and
+//! codeload.github.com, and none of these count against that limit. The REST API is left for
+//! what only it can do: abbreviated commit SHAs, private sources, releases, and comparing
+//! commits. A token is read from `GITHUB_PAT`, `GITHUB_TOKEN` or `GH_TOKEN`, as pak does; it is
+//! sent only to GitHub.
 
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -163,23 +166,40 @@ impl<'a> GitHub<'a> {
         })
     }
 
-    /// The commit a reference points to (the default branch for [`GitRef::DefaultBranch`]).
+    /// The commit a reference points to (the default branch for [`GitRef::DefaultBranch`]). A
+    /// full commit SHA is taken as it is: reading DESCRIPTION there checks it.
     pub fn resolve(
         &self,
         owner: &str,
         repo: &str,
         reference: &GitRef,
     ) -> Result<String, GitHubError> {
-        let r = match reference {
-            GitRef::DefaultBranch => "HEAD",
-            GitRef::Branch(b) => b,
-            GitRef::Tag(t) => t,
-            GitRef::Rev(r) => r,
+        if let GitRef::Rev(r) = reference
+            && is_sha(r)
+        {
+            return Ok(r.to_ascii_lowercase());
+        }
+        let refs = self.refs(owner, repo)?;
+        let (found, name) = match reference {
+            GitRef::DefaultBranch => (refs.head.clone(), "HEAD"),
+            GitRef::Branch(b) => (refs.branch(b), b.as_str()),
+            GitRef::Tag(t) => (refs.tag(t), t.as_str()),
+            GitRef::Rev(r) => return self.expand_sha(owner, repo, r),
         };
+        found.ok_or_else(|| GitHubError::UnknownRef {
+            owner: owner.to_string(),
+            repo: repo.to_string(),
+            reference: name.to_string(),
+        })
+    }
+
+    /// The full SHA of an abbreviated one, which only the REST API can tell.
+    fn expand_sha(&self, owner: &str, repo: &str, rev: &str) -> Result<String, GitHubError> {
+        let url = format!("{API}/repos/{owner}/{repo}/commits/{rev}");
         match self.api(
             owner,
             repo,
-            &format!("/commits/{r}"),
+            &format!("/commits/{rev}"),
             "application/vnd.github.sha",
         ) {
             Ok(body) => {
@@ -188,32 +208,55 @@ impl<'a> GitHub<'a> {
                     Ok(sha.to_ascii_lowercase())
                 } else {
                     Err(GitHubError::Response {
-                        url: format!("{API}/repos/{owner}/{repo}/commits/{r}"),
+                        url,
                         message: "not a commit SHA".to_string(),
                     })
                 }
             }
             Err(GitHubError::Http(HttpError::Status {
                 status: 404 | 422, ..
-            })) => {
-                // 404 for an unknown repository, 422 for an unknown reference.
-                if self
-                    .api(owner, repo, "", "application/vnd.github+json")
-                    .is_err()
-                {
-                    Err(GitHubError::NotFound {
-                        owner: owner.to_string(),
-                        repo: repo.to_string(),
-                    })
-                } else {
-                    Err(GitHubError::UnknownRef {
-                        owner: owner.to_string(),
-                        repo: repo.to_string(),
-                        reference: r.to_string(),
-                    })
-                }
-            }
+            })) => Err(GitHubError::UnknownRef {
+                owner: owner.to_string(),
+                repo: repo.to_string(),
+                reference: rev.to_string(),
+            }),
             Err(e) => Err(e),
+        }
+    }
+
+    /// The references of a repository, as `git ls-remote` lists them: Git's HTTP protocol, which
+    /// the REST API's rate limit does not apply to. GitHub answers 401 for a repository that
+    /// does not exist or that the token (if any) cannot read.
+    fn refs(&self, owner: &str, repo: &str) -> Result<Refs, GitHubError> {
+        let url =
+            format!("https://github.com/{owner}/{repo}.git/info/refs?service=git-upload-pack");
+        // Git sends a token as the password of Basic authentication.
+        let auth = self
+            .token
+            .as_ref()
+            .map(|t| format!("Basic {}", base64(format!("x-access-token:{t}").as_bytes())));
+        let mut response = self.http.get_any(
+            &url,
+            &auth
+                .iter()
+                .map(|a| ("Authorization", a.as_str()))
+                .collect::<Vec<_>>(),
+        )?;
+        // A token GitHub does not accept fails even for a public repository: try without.
+        if response.0.status == 401 && auth.is_some() {
+            response = self.http.get_any(&url, &[])?;
+        }
+        let (head, body) = response;
+        match head.status {
+            200 => Refs::parse(&body).ok_or(GitHubError::Response {
+                url,
+                message: "not a list of Git references".to_string(),
+            }),
+            401 | 403 | 404 => Err(GitHubError::NotFound {
+                owner: owner.to_string(),
+                repo: repo.to_string(),
+            }),
+            status => Err(HttpError::Status { url, status }.into()),
         }
     }
 
@@ -224,29 +267,20 @@ impl<'a> GitHub<'a> {
         repo: &str,
         reference: &str,
     ) -> Result<GitRef, GitHubError> {
-        let exists =
-            |path: String| match self.api(owner, repo, &path, "application/vnd.github+json") {
-                Ok(_) => Ok(true),
-                Err(GitHubError::Http(HttpError::Status { status: 404, .. })) => Ok(false),
-                Err(e) => Err(e),
-            };
-        if exists(format!("/git/ref/tags/{reference}"))? {
+        let refs = self.refs(owner, repo)?;
+        if refs.tag(reference).is_some() {
             return Ok(GitRef::Tag(reference.to_string()));
         }
-        if exists(format!("/branches/{reference}"))? {
+        if refs.branch(reference).is_some() {
             return Ok(GitRef::Branch(reference.to_string()));
         }
         let hex =
             (7..=40).contains(&reference.len()) && reference.bytes().all(|b| b.is_ascii_hexdigit());
         if hex {
-            self.resolve(owner, repo, &GitRef::Rev(reference.to_string()))?;
+            if !is_sha(reference) {
+                self.expand_sha(owner, repo, reference)?;
+            }
             return Ok(GitRef::Rev(reference.to_string()));
-        }
-        if !exists(String::new())? {
-            return Err(GitHubError::NotFound {
-                owner: owner.to_string(),
-                repo: repo.to_string(),
-            });
         }
         Err(GitHubError::UnknownRef {
             owner: owner.to_string(),
@@ -278,10 +312,20 @@ impl<'a> GitHub<'a> {
         let auth = self.token.as_ref().map(|t| format!("Bearer {t}"));
         let headers: Vec<(&str, &str)> =
             auth.iter().map(|a| ("Authorization", a.as_str())).collect();
-        let body = self.http.get_with(&url, &headers).map_err(|e| match e {
+        let body = match self.http.get_with(&url, &headers) {
+            // A token GitHub does not accept gets 404 even for a public repository: try without.
+            Err(HttpError::Status { status: 404, .. }) if auth.is_some() => {
+                self.http.get_with(&url, &[])
+            }
+            other => other,
+        };
+        let body = body.map_err(|e| match e {
             HttpError::Status { status: 404, .. } => GitHubError::Response {
                 url: url.clone(),
-                message: "no DESCRIPTION at the top of the repository (R packages in a subdirectory are not supported yet)".to_string(),
+                message: format!(
+                    "no DESCRIPTION at the top of the repository at commit {} (the commit may not exist; R packages in a subdirectory are not supported yet)",
+                    &commit[..commit.len().min(7)]
+                ),
             },
             other => other.into(),
         })?;
@@ -293,19 +337,18 @@ impl<'a> GitHub<'a> {
         Ok(text)
     }
 
-    /// Downloads the source at a commit as a `.tar.gz` (top directory `<repo>-<commit>`).
+    /// Downloads the source at a commit as a `.tar.gz` (one top directory). It comes from
+    /// codeload.github.com; a private repository's, which needs the token, from the REST API.
     pub fn tarball(&self, owner: &str, repo: &str, commit: &str) -> Result<Vec<u8>, GitHubError> {
-        match &self.token {
-            Some(_) => self.api(
+        let url = format!("https://codeload.github.com/{owner}/{repo}/tar.gz/{commit}");
+        match self.http.get_bytes(&url, None) {
+            Err(HttpError::Status { status: 404, .. }) if self.has_token() => self.api(
                 owner,
                 repo,
                 &format!("/tarball/{commit}"),
                 "application/vnd.github+json",
             ),
-            None => Ok(self.http.get_bytes(
-                &format!("https://codeload.github.com/{owner}/{repo}/tar.gz/{commit}"),
-                None,
-            )?),
+            other => Ok(other?),
         }
     }
 
@@ -326,6 +369,83 @@ impl<'a> GitHub<'a> {
         let v: serde_json::Value = serde_json::from_slice(&body).ok()?;
         v.get("ahead_by")?.as_u64()
     }
+}
+
+/// A repository's references from Git's HTTP protocol (`info/refs`).
+#[derive(Debug, Default, PartialEq, Eq)]
+struct Refs {
+    /// The commit of the default branch.
+    head: Option<String>,
+    /// Full names (`refs/heads/main`, `refs/tags/v1.0`, and `refs/tags/v1.0^{}` for the commit
+    /// an annotated tag points to) and their SHAs.
+    refs: std::collections::HashMap<String, String>,
+}
+
+impl Refs {
+    /// Reads the "smart" reference advertisement: lines in Git's pkt-line format, each a SHA
+    /// and a name (the first also lists the server's capabilities after a NUL).
+    fn parse(body: &[u8]) -> Option<Refs> {
+        let mut out = Refs::default();
+        let mut rest = body;
+        while rest.len() >= 4 {
+            let len = usize::from_str_radix(std::str::from_utf8(&rest[..4]).ok()?, 16).ok()?;
+            if len == 0 {
+                rest = &rest[4..];
+                continue;
+            }
+            if len < 4 || len > rest.len() {
+                return None;
+            }
+            let line = std::str::from_utf8(&rest[4..len]).ok()?;
+            rest = &rest[len..];
+            let line = line.split('\0').next()?.trim_end_matches('\n');
+            if line.starts_with('#') {
+                continue;
+            }
+            let (sha, name) = line.split_once(' ')?;
+            if !is_sha(sha) {
+                return None;
+            }
+            let sha = sha.to_ascii_lowercase();
+            if name == "HEAD" {
+                out.head = Some(sha);
+            } else {
+                out.refs.insert(name.to_string(), sha);
+            }
+        }
+        Some(out)
+    }
+
+    fn branch(&self, name: &str) -> Option<String> {
+        self.refs.get(&format!("refs/heads/{name}")).cloned()
+    }
+
+    /// The commit a tag points to (through an annotated tag's object).
+    fn tag(&self, name: &str) -> Option<String> {
+        let tag = format!("refs/tags/{name}");
+        self.refs
+            .get(&format!("{tag}^{{}}"))
+            .or_else(|| self.refs.get(&tag))
+            .cloned()
+    }
+}
+
+/// Standard base64, for Basic authentication.
+fn base64(input: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
+    for chunk in input.chunks(3) {
+        let byte = |i: usize| u32::from(chunk.get(i).copied().unwrap_or(0));
+        let n = byte(0) << 16 | byte(1) << 8 | byte(2);
+        for i in 0..4 {
+            out.push(if i <= chunk.len() {
+                char::from(ALPHABET[(n >> (18 - 6 * i) & 63) as usize])
+            } else {
+                '='
+            });
+        }
+    }
+    out
 }
 
 /// The longest wait for a secondary rate limit before trying again.
@@ -413,6 +533,43 @@ pub fn parse_spec(spec: &str) -> Option<(String, String, Option<String>)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reads_git_reference_lists() {
+        let pkt = |s: &str| format!("{:04x}{s}", s.len() + 4);
+        let (a, b, c, d) = (
+            "a".repeat(40),
+            "b".repeat(40),
+            "c".repeat(40),
+            "d".repeat(40),
+        );
+        let body = [
+            pkt("# service=git-upload-pack\n"),
+            "0000".to_string(),
+            pkt(&format!(
+                "{a} HEAD\0multi_ack symref=HEAD:refs/heads/main\n"
+            )),
+            pkt(&format!("{a} refs/heads/main\n")),
+            pkt(&format!("{b} refs/tags/v1.0\n")),
+            pkt(&format!("{c} refs/tags/v2.0\n")),
+            pkt(&format!("{d} refs/tags/v2.0^{{}}\n")),
+            "0000".to_string(),
+        ]
+        .concat();
+        let refs = Refs::parse(body.as_bytes()).unwrap();
+        assert_eq!(refs.head.as_deref(), Some(a.as_str()));
+        assert_eq!(refs.branch("main").as_deref(), Some(a.as_str()));
+        assert_eq!(refs.branch("dev"), None);
+        // A lightweight tag is the commit; an annotated one points to it.
+        assert_eq!(refs.tag("v1.0").as_deref(), Some(b.as_str()));
+        assert_eq!(refs.tag("v2.0").as_deref(), Some(d.as_str()));
+        // An empty repository lists nothing; anything else is not a list.
+        assert_eq!(Refs::parse(b"0000").unwrap(), Refs::default());
+        assert_eq!(Refs::parse(b"<html>"), None);
+        assert_eq!(base64(b"x-access-token:abc"), "eC1hY2Nlc3MtdG9rZW46YWJj");
+        assert_eq!(base64(b"ab"), "YWI=");
+        assert_eq!(base64(b"a"), "YQ==");
+    }
 
     #[test]
     fn reads_why_the_api_refused() {

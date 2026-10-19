@@ -237,3 +237,39 @@ fn scans_a_real_project() {
         eprintln!("suggested {pkg}: for {} in {}", why[0].0, why[0].1);
     }
 }
+
+#[test]
+#[ignore = "needs the network"]
+fn resolves_github_references_with_git() {
+    use rok_core::github::{GitHub, GitHubError};
+    use rok_core::manifest::GitRef;
+
+    // Through Git's HTTP protocol, without the REST API and its rate limit.
+    let http = Http::new();
+    let gh = GitHub::new(&http);
+    let head = gh
+        .resolve("gaborcsardi", "praise", &GitRef::DefaultBranch)
+        .unwrap();
+    assert_eq!(head.len(), 40);
+    assert_eq!(
+        gh.resolve("gaborcsardi", "praise", &GitRef::Tag("v1.0.0".into()))
+            .unwrap(),
+        "2c8c1229c06f953d8dddc1f45e85bcbf6f7e5278"
+    );
+    assert_eq!(
+        gh.classify("gaborcsardi", "praise", "v1.0.0").unwrap(),
+        GitRef::Tag("v1.0.0".into())
+    );
+    assert!(matches!(
+        gh.classify("gaborcsardi", "praise", "no-such-ref"),
+        Err(GitHubError::UnknownRef { .. })
+    ));
+    assert!(matches!(
+        gh.resolve(
+            "gaborcsardi",
+            "no-such-repo-for-rok",
+            &GitRef::DefaultBranch
+        ),
+        Err(GitHubError::NotFound { .. })
+    ));
+}
