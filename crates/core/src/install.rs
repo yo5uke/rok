@@ -162,6 +162,11 @@ pub struct Built {
     pub git: bool,
 }
 
+/// The environment variable that sets R's default time limit for downloads (`timeout`), and
+/// the limit in seconds for builds when it is not set.
+const INTERNET_TIMEOUT: &str = "R_DEFAULT_INTERNET_TIMEOUT";
+const BUILD_INTERNET_TIMEOUT: &str = "600";
+
 /// A downloaded source: a tarball, or a directory for Git sources.
 struct Fetched {
     path: PathBuf,
@@ -695,8 +700,8 @@ impl Context<'_> {
             .join("bin")
             .join(if cfg!(windows) { "R.exe" } else { "R" });
         // R_HOME of another R (rok started from R) would point this R elsewhere.
-        let status = Command::new(&r)
-            .env_remove("R_HOME")
+        let mut cmd = Command::new(&r);
+        cmd.env_remove("R_HOME")
             .args(["CMD", "INSTALL", "--no-docs", "--no-multiarch"])
             .arg(format!("--library={}", out.display()))
             .arg(source)
@@ -704,7 +709,14 @@ impl Context<'_> {
             .env("R_LIBS_USER", &empty)
             .env("R_LIBS_SITE", &empty)
             .env("R_PROFILE_USER", empty.join("none"))
-            .env("R_ENVIRON_USER", empty.join("none"))
+            .env("R_ENVIRON_USER", empty.join("none"));
+        // Some builds download a large prebuilt library (polars' Rust library is 280 MB), which
+        // R's default of 60 seconds can cut off, so that the build falls back to compiling it.
+        // Waiting longer does not change what is built: it is not part of the cache key.
+        if std::env::var_os(INTERNET_TIMEOUT).is_none() {
+            cmd.env(INTERNET_TIMEOUT, BUILD_INTERNET_TIMEOUT);
+        }
+        let status = cmd
             .envs(&w.env)
             .stdout(log_file)
             .stderr(log_err)
