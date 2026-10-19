@@ -6,8 +6,9 @@
 //! `GITHUB_PAT`, `GITHUB_TOKEN` or `GH_TOKEN`, as pak does; it is sent only to GitHub.
 
 use std::path::PathBuf;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use crate::http::{Http, HttpError};
+use crate::http::{Head, Http, HttpError};
 use crate::manifest::GitRef;
 
 const API: &str = "https://api.github.com";
@@ -26,10 +27,15 @@ pub enum GitHubError {
         "{owner}/{repo} was not found on GitHub, or it is private.\nFor a private repository, set GITHUB_PAT to a token that can read it."
     )]
     NotFound { owner: String, repo: String },
-    #[error(
-        "{owner}/{repo}: GitHub's API rate limit was reached.\nSet GITHUB_PAT to a token to raise the limit."
-    )]
-    RateLimited { owner: String, repo: String },
+    /// The message says whether a token was used and when the limit resets.
+    #[error("{message}")]
+    RateLimited { message: String },
+    #[error("{owner}/{repo}: GitHub refused the request: {message}")]
+    Refused {
+        owner: String,
+        repo: String,
+        message: String,
+    },
     #[error("Unexpected response from {url}: {message}.")]
     Response { url: String, message: String },
 }
@@ -78,15 +84,57 @@ impl<'a> GitHub<'a> {
         if let Some(a) = &auth {
             headers.push(("Authorization", a.as_str()));
         }
-        self.http.get_with(&url, &headers).map_err(|e| match e {
-            HttpError::Status {
-                status: 403 | 429, ..
-            } => GitHubError::RateLimited {
-                owner: owner.to_string(),
-                repo: repo.to_string(),
-            },
-            other => other.into(),
-        })
+        let mut waited = false;
+        loop {
+            let (head, body) = self.http.get_any(&url, &headers)?;
+            let status = head.status;
+            if (200..300).contains(&status) {
+                return Ok(body);
+            }
+            if !matches!(status, 403 | 429) {
+                return Err(HttpError::Status { url, status }.into());
+            }
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_or(0, |d| d.as_secs());
+            match refusal(&head, &body, now) {
+                // A secondary limit asks to wait a little: once, then try again.
+                Refusal::Secondary { retry_after } if !waited && retry_after <= MAX_WAIT => {
+                    std::thread::sleep(Duration::from_secs(retry_after));
+                    waited = true;
+                }
+                Refusal::Primary { resets_in } => {
+                    return Err(self.rate_limited(owner, repo, resets_in));
+                }
+                Refusal::Secondary { retry_after } => {
+                    return Err(self.rate_limited(owner, repo, Some(retry_after)));
+                }
+                Refusal::Other(message) => {
+                    return Err(GitHubError::Refused {
+                        owner: owner.to_string(),
+                        repo: repo.to_string(),
+                        message,
+                    });
+                }
+            }
+        }
+    }
+
+    fn rate_limited(&self, owner: &str, repo: &str, resets_in: Option<u64>) -> GitHubError {
+        let when = match resets_in {
+            Some(s) => format!(" (try again in {} min)", s.div_ceil(60).max(1)),
+            None => String::new(),
+        };
+        let message = if self.has_token() {
+            format!(
+                "{owner}/{repo}: GitHub's API rate limit for the token in GITHUB_PAT (or GITHUB_TOKEN, GH_TOKEN) was reached{when}."
+            )
+        } else {
+            format!(
+                "{owner}/{repo}: GitHub's API rate limit was reached{when}.\nSet GITHUB_PAT to a token to raise the limit."
+            )
+        };
+        GitHubError::RateLimited { message }
     }
 
     /// The repository's releases (newest first, as GitHub lists them), as JSON.
@@ -268,6 +316,56 @@ impl<'a> GitHub<'a> {
     }
 }
 
+/// The longest wait for a secondary rate limit before trying again.
+const MAX_WAIT: u64 = 60;
+
+/// Why GitHub's API refused a request (403 or 429), as GitHub documents its rate limits.
+#[derive(Debug, PartialEq, Eq)]
+enum Refusal {
+    /// The hourly limit was used up; it resets in this many seconds, if GitHub said.
+    Primary { resets_in: Option<u64> },
+    /// A secondary limit (too many requests at once, for example): try again after this many
+    /// seconds.
+    Secondary { retry_after: u64 },
+    /// Another reason, in GitHub's words.
+    Other(String),
+}
+
+/// Reads a refusal: the `retry-after` and `x-ratelimit-*` headers, and the message in the body.
+/// `now` is the time in seconds since the Unix epoch.
+fn refusal(head: &Head, body: &[u8], now: u64) -> Refusal {
+    let message = serde_json::from_slice::<serde_json::Value>(body)
+        .ok()
+        .and_then(|v| v.get("message")?.as_str().map(str::to_string))
+        .unwrap_or_default();
+    let lower = message.to_ascii_lowercase();
+    if let Some(retry_after) = head
+        .header("retry-after")
+        .and_then(|v| v.trim().parse().ok())
+    {
+        return Refusal::Secondary { retry_after };
+    }
+    if head.header("x-ratelimit-remaining").map(str::trim) == Some("0") {
+        let resets_in = head
+            .header("x-ratelimit-reset")
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .map(|reset| reset.saturating_sub(now));
+        return Refusal::Primary { resets_in };
+    }
+    // Without the headers, GitHub's advice is to wait at least a minute.
+    if lower.contains("secondary rate limit") || head.status == 429 {
+        return Refusal::Secondary { retry_after: 60 };
+    }
+    if lower.contains("rate limit") {
+        return Refusal::Primary { resets_in: None };
+    }
+    Refusal::Other(if message.is_empty() {
+        format!("HTTP {}", head.status)
+    } else {
+        message
+    })
+}
+
 /// Whether `s` is a full commit SHA.
 fn is_sha(s: &str) -> bool {
     s.len() == 40 && s.bytes().all(|b| b.is_ascii_hexdigit())
@@ -296,6 +394,60 @@ pub fn parse_spec(spec: &str) -> Option<(String, String, Option<String>)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reads_why_the_api_refused() {
+        let head = |status: u16, headers: &[(&str, &str)]| {
+            Head::new(
+                status,
+                headers
+                    .iter()
+                    .map(|(k, v)| (k.to_string(), v.to_string()))
+                    .collect(),
+            )
+        };
+        let body = |m: &str| format!(r#"{{"message": "{m}"}}"#).into_bytes();
+        assert_eq!(
+            refusal(
+                &head(
+                    403,
+                    &[
+                        ("x-ratelimit-remaining", "0"),
+                        ("x-ratelimit-reset", "1300")
+                    ]
+                ),
+                &body("API rate limit exceeded for 1.2.3.4."),
+                1000
+            ),
+            Refusal::Primary {
+                resets_in: Some(300)
+            }
+        );
+        assert_eq!(
+            refusal(&head(403, &[("Retry-After", "30")]), b"", 0),
+            Refusal::Secondary { retry_after: 30 }
+        );
+        assert_eq!(
+            refusal(
+                &head(403, &[]),
+                &body("You have exceeded a secondary rate limit."),
+                0
+            ),
+            Refusal::Secondary { retry_after: 60 }
+        );
+        assert_eq!(
+            refusal(
+                &head(403, &[("x-ratelimit-remaining", "4999")]),
+                &body("Resource not accessible by integration"),
+                0
+            ),
+            Refusal::Other("Resource not accessible by integration".into())
+        );
+        assert_eq!(
+            refusal(&head(403, &[]), b"<html>", 0),
+            Refusal::Other("HTTP 403".into())
+        );
+    }
 
     #[test]
     fn reads_descriptions_at_commits_from_the_cache() {

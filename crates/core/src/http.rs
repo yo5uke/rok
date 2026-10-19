@@ -42,6 +42,10 @@ pub struct Head {
 }
 
 impl Head {
+    pub fn new(status: u16, headers: Vec<(String, String)>) -> Head {
+        Head { status, headers }
+    }
+
     /// A header value; names are case-insensitive.
     pub fn header(&self, name: &str) -> Option<&str> {
         self.headers
@@ -107,6 +111,32 @@ impl Http {
             .limit(MAX_BODY)
             .read_to_vec()
             .map_err(transport)
+    }
+
+    /// GET `url` with extra headers. Any status is returned, with the headers and the body
+    /// (for an error, its explanation); only transport failures are errors.
+    pub fn get_any(
+        &self,
+        url: &str,
+        headers: &[(&str, &str)],
+    ) -> Result<(Head, Vec<u8>), HttpError> {
+        let transport = |source| HttpError::Transport {
+            url: url.to_string(),
+            source: Box::new(source),
+        };
+        let mut req = self.agent.get(url);
+        for (k, v) in headers {
+            req = req.header(*k, *v);
+        }
+        let mut resp = req.call().map_err(transport)?;
+        let head = Self::head_from(&resp);
+        let body = resp
+            .body_mut()
+            .with_config()
+            .limit(MAX_BODY)
+            .read_to_vec()
+            .map_err(transport)?;
+        Ok((head, body))
     }
 
     /// GET `url` and return the body, reporting the progress to `transfers` as `name`.
@@ -206,15 +236,19 @@ impl Http {
             url: url.to_string(),
             source: Box::new(source),
         })?;
+        Ok(Self::head_from(&resp))
+    }
+
+    fn head_from(resp: &ureq::http::Response<ureq::Body>) -> Head {
         let headers = resp
             .headers()
             .iter()
             .filter_map(|(k, v)| Some((k.as_str().to_string(), v.to_str().ok()?.to_string())))
             .collect();
-        Ok(Head {
+        Head {
             status: resp.status().as_u16(),
             headers,
-        })
+        }
     }
 }
 
