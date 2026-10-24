@@ -4,10 +4,10 @@
 \alias{init}
 \title{Create a project}
 \usage{
-init(path = ".", r = NULL, name = NULL)
+init(path, r = NULL, name = NULL)
 }
 \arguments{
-\item{path}{The project directory (created if needed).}
+\item{path}{The project directory (created if needed); \code{"."} for the working directory.}
 
 \item{r}{The R version, such as \code{"4.6"} or \code{"latest"} (default: the running R).}
 
@@ -24,9 +24,8 @@ has published. If the rok binary is not installed yet, \code{\link[=setup]{setup
 \details{
 In an interactive session, R then switches to the project: in Positron or RStudio, R
 restarts (after asking if the global environment has objects), or the IDE opens the new
-project's folder; elsewhere, if no packages are loaded yet, the session switches to the
-project (working directory and library), after asking. In Positron, the project's R is also
-written to \code{.vscode/settings.json}, after asking.
+project's folder; elsewhere, you are told to start R in the project's folder. In Positron,
+the project's R is also written to \code{.vscode/settings.json}, after asking.
 }
 \examples{
 \dontshow{if (interactive() && rok_available()) withAutoprint(\{ # examplesIf}

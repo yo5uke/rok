@@ -1,5 +1,8 @@
 # rok (development version)
 
+* `init()` needs the project directory: `init(".")` for the working directory.
+* Outside Positron and RStudio, `init()` no longer switches the running R session to the
+  project; it says to start R in the project folder.
 * `add()` takes `repo`, the URL of a CRAN-like repository such as R-multiverse or an
   r-universe; the repository is declared in `rok.toml` under a name taken from the URL.
 * Known build-time environment variables, such as `NOT_CRAN = "true"` for polars, are offered

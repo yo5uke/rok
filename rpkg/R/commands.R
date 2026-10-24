@@ -18,11 +18,10 @@ project_arg <- function(project) {
 #'
 #' In an interactive session, R then switches to the project: in Positron or RStudio, R
 #' restarts (after asking if the global environment has objects), or the IDE opens the new
-#' project's folder; elsewhere, if no packages are loaded yet, the session switches to the
-#' project (working directory and library), after asking. In Positron, the project's R is also
-#' written to `.vscode/settings.json`, after asking.
+#' project's folder; elsewhere, you are told to start R in the project's folder. In Positron,
+#' the project's R is also written to `.vscode/settings.json`, after asking.
 #'
-#' @param path The project directory (created if needed).
+#' @param path The project directory (created if needed); `"."` for the working directory.
 #' @param r The R version, such as `"4.6"` or `"latest"` (default: the running R).
 #' @param name The project name (default: the directory name).
 #' @returns The result, invisibly.
@@ -31,7 +30,12 @@ project_arg <- function(project) {
 #' dir <- tempfile("my-analysis")
 #' init(dir)
 #' list.files(dir, all.files = TRUE, no.. = TRUE)
-init <- function(path = ".", r = NULL, name = NULL) {
+init <- function(path, r = NULL, name = NULL) {
+  if (missing(path)) {
+    stop("Give the project directory, such as `init(\".\")` for the working directory.",
+      call. = FALSE
+    )
+  }
   # The first init installs the binary, after asking once.
   if (!rok_available()) setup()
   if (is.null(r)) r <- current_r_minor()

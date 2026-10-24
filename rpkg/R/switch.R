@@ -1,16 +1,16 @@
 # Switching to the project after init() (requirements chapter 5): in an IDE, restart R there
-# (or open the project); outside one, activate the project in this session if nothing is
-# loaded yet. `.rs.api.restartSession()` restarts R in both Positron and RStudio (V8).
+# (or open the project); outside one, say where to start R. The running session's working
+# directory, options and library paths are left as they are (CRAN policy).
+# `.rs.api.restartSession()` restarts R in both Positron and RStudio (V8).
 
-# What to do after init(): "restart", "open", "activate", "advise" or "switch-r".
+# What to do after init(): "restart", "open", "advise" or "switch-r".
 #   same      the project is the working directory
 #   ide       "positron", "rstudio" or "none"
-#   loaded    packages loaded besides R's own and rok
 #   same_r    the running R has the project's minor version
-after_init_action <- function(same, ide, loaded, same_r) {
+after_init_action <- function(same, ide, same_r) {
   if (!same_r) return("switch-r")
-  if (ide != "none") return(if (same) "restart" else "open")
-  if (length(loaded)) "advise" else "activate"
+  if (ide == "none") return("advise")
+  if (same) "restart" else "open"
 }
 
 # The objects a restart would clear. .Random.seed is not the person's work: Positron's help
@@ -32,12 +32,11 @@ ide_call <- function(name, ...) {
 
 switch_to_project <- function(root, r_version) {
   root <- normalizePath(root, mustWork = FALSE)
-  base_pkgs <- rownames(utils::installed.packages(lib.loc = .Library, priority = "base"))
   ide <- running_ide()
+  same <- identical(root, normalizePath(getwd(), mustWork = FALSE))
   action <- after_init_action(
-    same = identical(root, normalizePath(getwd(), mustWork = FALSE)),
+    same = same,
     ide = ide,
-    loaded = setdiff(loadedNamespaces(), c(base_pkgs, "rok")),
     same_r = identical(sub("^(\\d+\\.\\d+).*$", "\\1", r_version), current_r_minor())
   )
   ide_name <- if (ide == "positron") "Positron" else "RStudio"
@@ -65,22 +64,8 @@ switch_to_project <- function(root, r_version) {
       }
       if (!opened) message("\u2139 Open ", root, " in ", ide_name, " to use the project.")
     },
-    activate = {
-      # The working directory and the library paths change: only when asked.
-      ok <- isTRUE(ask_yes_no(paste0(
-        "Switch this R session to the project? The working directory becomes ", root, "."
-      )))
-      if (!ok) {
-        message("\u2139 Start R in ", root, " to use the project.")
-        return(invisible())
-      }
-      setwd(root)
-      source(file.path(root, ".rok", "activate.R"), local = new.env())
-      message("\u2714 Switched to the project: the working directory is ", root, ".")
-    },
     advise = message(
-      "\u2139 Packages are already loaded in this R session. Restart R in ", root,
-      " to use the project."
+      "\u2139 ", if (same) "Restart R" else paste("Start R in", root), " to use the project."
     )
   )
   invisible()

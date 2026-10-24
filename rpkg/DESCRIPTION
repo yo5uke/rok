@@ -8,7 +8,7 @@ Description: Manages the packages and the R version of a project. Packages
     <https://packagemanager.posit.co> and recorded in a lockfile, so that a
     project can be reproduced as it was. The work is done by the 'rok'
     command-line program, which this package downloads from the project's
-    GitHub releases on first use, after asking for user consent.
+    'GitHub' releases on first use, after asking for user consent.
 License: MIT + file LICENSE
 URL: https://github.com/yo5uke/rok
 BugReports: https://github.com/yo5uke/rok/issues

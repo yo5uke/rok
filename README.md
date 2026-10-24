@@ -47,7 +47,7 @@ In R:
 
 ```r
 # Create a project in the working directory
-rok::init()
+rok::init(".")
 
 # Declare, resolve, lock and install packages
 rok::add("fixest", "modelsummary")
@@ -142,7 +142,7 @@ Git commit if a repository no longer has them). `rok export renv` writes a `renv
 
 In Positron, `rok::init()` offers to write the project's R to `.vscode/settings.json`, with
 paths that start with `~` so that the file is the same for everyone. After `init()`, R
-restarts in the project (Positron and RStudio).
+restarts in the project (Positron and RStudio). Elsewhere, start R in the project folder.
 
 ## Where rok keeps things
 

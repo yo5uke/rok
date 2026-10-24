@@ -47,7 +47,7 @@ if (nzchar(bin) && file.exists(bin)) {
   dir.create(home)
   old <- Sys.getenv(c("ROK_DATA_DIR", "ROK_CACHE_DIR"))
   Sys.setenv(ROK_DATA_DIR = file.path(home, "data"), ROK_CACHE_DIR = file.path(home, "cache"))
-  options(rok.yes = TRUE, rok.binary = NULL)
+  op <- options(rok.yes = TRUE, rok.binary = NULL)
 
   paths <- rok::setup(binary = bin)
   stopifnot(
@@ -65,6 +65,7 @@ if (nzchar(bin) && file.exists(bin)) {
   status <- suppressMessages(rok:::run_watched(paths$binary, c("r", "list", "--json"), out))
   stopifnot(identical(status, 0L), grepl('"r list"', paste(readLines(out), collapse = "")))
 
+  options(op)
   do.call(Sys.setenv, as.list(old))
   unlink(home, recursive = TRUE)
 }
@@ -73,14 +74,17 @@ if (nzchar(bin) && file.exists(bin)) {
 if (nzchar(bin) && file.exists(bin) && .Platform$OS.type == "unix") {
   home <- tempfile("rok test ")
   dir.create(home)
+  old <- Sys.getenv(c("ROK_DATA_DIR", "ROK_CACHE_DIR"))
   Sys.setenv(ROK_DATA_DIR = file.path(home, "data"), ROK_CACHE_DIR = file.path(home, "cache"))
-  options(rok.binary = bin)
+  op <- options(rok.binary = bin)
   res <- tryCatch(
     rok:::rok_call(c("add", "x", "--version", "< 0.13 & echo injected")),
     error = conditionMessage
   )
   # Outside a project the command fails; what matters is that no shell ran `echo`.
   stopifnot(is.character(res), !file.exists("0.13"))
+  options(op)
+  do.call(Sys.setenv, as.list(old))
   unlink(home, recursive = TRUE)
 }
 

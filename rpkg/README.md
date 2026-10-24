@@ -24,7 +24,7 @@ pak::pak("rok")
 
 ```r
 # Create a project in the working directory
-rok::init()
+rok::init(".")
 
 # Declare, resolve, lock and install packages
 rok::add("fixest", "sf")
