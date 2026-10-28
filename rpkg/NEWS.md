@@ -1,4 +1,4 @@
-# rok (development version)
+# rok 0.2.0
 
 * Without a directory, `init()` asks before creating the project in the working directory;
   the first time, the same question covers installing the rok program.
@@ -19,6 +19,10 @@
 * Locked GitHub packages keep their version constraints when the project is resolved again.
 * Builds from source allow downloads to take up to 10 minutes, so that packages that download
   a large prebuilt library (polars) do not fall back to compiling it.
+* Branches, tags and default branches of GitHub packages are resolved with the reference list
+  Git itself reads, not GitHub's REST API, whose limit of 60 requests an hour without a token
+  is often used up on shared addresses such as CI runners. A token GitHub does not accept no
+  longer breaks public repositories.
 * Errors from GitHub's API say whether a rate limit was reached, and a short secondary limit is
   waited out once.
 

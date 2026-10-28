@@ -8,7 +8,7 @@ rok keeps each R project reproducible. A project declares the packages it uses i
 sources, and R version in `rok.lock`, and links them into the project's library from a shared
 cache. Anyone who opens the project gets the same packages, and the same R if they need it.
 
-> **Status:** pre-release (0.1.0). Linux and Windows are supported; macOS is experimental.
+> **Status:** pre-release (0.2.0). Linux and Windows are supported; macOS is experimental.
 
 ## Why rok
 
@@ -31,7 +31,7 @@ From R, install the package and let it fetch the command-line program:
 
 ```r
 install.packages(
-  "https://github.com/yo5uke/rok/releases/download/v0.1.0/rok_0.1.0.tar.gz",
+  "https://github.com/yo5uke/rok/releases/download/v0.2.0/rok_0.2.0.tar.gz",
   repos = NULL, type = "source"
 )
 rok::setup()   # downloads the rok program for this machine, after asking
@@ -99,7 +99,7 @@ forward calls meant for them.
 | `status()` | `rok status` | Show what is out of sync |
 | `why()`, `tree()` | `rok why`, `rok tree` | Show why a package is there, and the dependency tree |
 | `run()` | `rok run` | Run a script with the project's R and library |
-| `install_r()`, `pin_r()` | `rok r install`, `rok r pin` | Install R; move the project to another R version |
+| `install_r()`, `pin_r()` | `rok r install`, `rok r pin` | Install R (after asking); move the project to another R version |
 | | `rok r list`, `rok r uninstall` | List and remove R versions |
 | `import_renv()`, `export_renv()` | `rok import renv`, `rok export renv` | Migrate from renv; write `renv.lock` |
 | | `rok self update` | Update rok |
@@ -154,6 +154,10 @@ restarts in the project (Positron and RStudio). Elsewhere, start R in the projec
 `ROK_DATA_DIR` and `ROK_CACHE_DIR` can override these locations. rok never needs administrator
 rights and does not change user-wide settings; on Linux, when a package or R needs system libraries, it shows the
 `apt` command to install them.
+
+rok asks before it installs its program or R, and before `rok::init()` creates a project in
+the working directory. `--yes` in a terminal, or `options(rok.yes = TRUE)` in R, answers yes
+to every question; without anyone to ask, rok stops instead.
 
 ## License
 

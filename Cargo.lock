@@ -464,7 +464,7 @@ dependencies = [
 
 [[package]]
 name = "rok-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -478,7 +478,7 @@ dependencies = [
 
 [[package]]
 name = "rok-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "flate2",
  "junction",
@@ -498,7 +498,7 @@ dependencies = [
 
 [[package]]
 name = "rok-rinstall"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "flate2",
  "rok-core",
