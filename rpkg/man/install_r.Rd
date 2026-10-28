@@ -16,7 +16,9 @@ The result, invisibly.
 }
 \description{
 Installs R without administrator rights. Without \code{version}, installs the version the
-project in the working directory needs (or, outside a project, the latest release).
+project in the working directory needs (or, outside a project, the latest release). Before
+installing, it says which version and where it goes, and asks (without anyone to ask, set
+\code{options(rok.yes = TRUE)}).
 }
 \examples{
 \dontshow{if (interactive() && rok_available()) withAutoprint(\{ # examplesIf}

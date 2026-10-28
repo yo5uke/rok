@@ -30,7 +30,7 @@ done
 echo "   binary: $data/bin/rok"
 
 echo "## 2. R $minor"
-"$data/bin/rok" r install "$minor" 2>&1 | tail -2
+"$data/bin/rok" r install "$minor" --yes 2>&1 | tail -2
 r45=$(ls -d "$data/r/$minor".* | sort -V | tail -1)
 # The R package for each R that the checks use (setup() does this for the running R).
 R CMD INSTALL --no-test-load -l "$data/library/R-4.6" "$build"/rok_*.tar.gz > /dev/null 2>&1

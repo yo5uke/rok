@@ -316,7 +316,9 @@ pin_r <- function(version, strategy = NULL, project = ".") {
 #' Install R
 #'
 #' Installs R without administrator rights. Without `version`, installs the version the
-#' project in the working directory needs (or, outside a project, the latest release).
+#' project in the working directory needs (or, outside a project, the latest release). Before
+#' installing, it says which version and where it goes, and asks (without anyone to ask, set
+#' `options(rok.yes = TRUE)`).
 #'
 #' @param version A version such as `"4.6"`, `"4.6.1"` or `"latest"`.
 #' @param system Only show the commands that install R for all users (they need `sudo`).

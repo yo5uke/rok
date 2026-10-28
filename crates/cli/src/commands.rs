@@ -60,7 +60,7 @@ pub(crate) fn project_r(
             "This project needs R {minor}, which is not installed (found: {found})."
         ));
         let (version, why) = crate::rcmd::needed_version(ui, env, manifest, lock)?;
-        if !ui.confirm("install-r", &format!("Install R {version} ({why})?"), true)? {
+        if !crate::rcmd::confirm_install_r(ui, env, &version, &why)? {
             bail!(
                 "Install R {minor} with `rok r install`, or move the project to an installed R with `rok r pin`."
             );
@@ -466,7 +466,7 @@ fn init_r(
         (_, Some(a)) => format!("the newest release matching `{a}`"),
         (_, None) => "the newest release".to_string(),
     };
-    if !ui.confirm("install-r", &format!("Install R {version} ({why})?"), true)? {
+    if !crate::rcmd::confirm_install_r(ui, env, &version, &why)? {
         bail!("Cancelled. Nothing was changed.");
     }
     crate::rcmd::install_r(ui, env, &version, &why)

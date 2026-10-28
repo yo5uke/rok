@@ -83,6 +83,21 @@ pub(crate) fn needed_version(
     ))
 }
 
+/// Asks before installing R `version`, saying why and where it goes (requirements chapter 6).
+pub(crate) fn confirm_install_r(
+    ui: &Ui,
+    env: &Env,
+    version: &Version,
+    why: &str,
+) -> anyhow::Result<bool> {
+    let dir = home_relative(&rinstall::install_dir(&env.dirs, version));
+    ui.confirm(
+        "install-r",
+        &format!("Install R {version} ({why}) in {dir}?"),
+        true,
+    )
+}
+
 /// Installs R `version`, then checks that the system has the libraries it needs.
 pub(crate) fn install_r(
     ui: &Ui,
@@ -268,6 +283,9 @@ pub fn install(
             json!({ "command": "r install", "version": version.to_string(), "installed": false }),
         );
         return Ok(());
+    }
+    if !confirm_install_r(ui, &env, &version, &reason)? {
+        bail!("Cancelled. Nothing was changed.");
     }
     let r = install_r(ui, &env, &version, &reason)?;
     ui.result(json!({
@@ -464,12 +482,7 @@ pub fn pin(
     // Install the new R if needed, then sync its library before saving anything.
     let r = match ops::select_r(&installs, &target.minor(), Some(&target)) {
         Some(r) => Some(r.clone()),
-        None if ui.confirm(
-            "install-r",
-            &format!("R {target} is not installed. Install it now?"),
-            true,
-        )? =>
-        {
+        None if confirm_install_r(ui, &env, &target, "the project moves to it")? => {
             Some(install_r(ui, &env, &target, "the project moves to it")?)
         }
         None => None,

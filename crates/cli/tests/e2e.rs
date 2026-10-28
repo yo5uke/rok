@@ -307,6 +307,27 @@ fn hands_questions_back_to_programs() {
     ));
     assert_eq!(answered["name"], "sub");
     assert!(proj.join("sub/rok.toml").is_file());
+
+    // Installing R asks first, saying which version and where, even when asked for by name
+    // (4.3.3: a version that the machine running the tests is unlikely to have).
+    let asked = rok(home, &["r", "install", "4.3.3", "--json"]);
+    assert_eq!(asked.status.code(), Some(2));
+    let needs: serde_json::Value = serde_json::from_slice(&asked.stdout).unwrap();
+    assert_eq!(needs["needs"]["id"], "install-r");
+    let question = unix_text(needs["needs"]["question"].as_str().unwrap().as_bytes());
+    assert!(
+        question.starts_with("Install R 4.3.3 (as requested) in "),
+        "{question}"
+    );
+    assert!(
+        question.contains("R-4.3.3") || question.contains("/4.3.3"),
+        "{question}"
+    );
+    // Without a terminal or --yes, no one can answer: nothing is installed.
+    let refused = rok(home, &["r", "install", "4.3.3"]);
+    assert_eq!(refused.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("--yes"));
+    assert!(!home.join("data/r").exists());
 }
 
 #[test]
