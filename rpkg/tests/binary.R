@@ -41,6 +41,17 @@ local({
   stopifnot(inherits(try(rok:::ask(needs), silent = TRUE), "try-error"))
 })
 
+# Without a directory, init() writes to the working directory only after asking: without
+# anyone to ask, it stops before anything is written.
+local({
+  err <- tryCatch(rok::init(), error = conditionMessage)
+  stopifnot(
+    grepl("rok will create a project in", err, fixed = TRUE),
+    grepl("init(\".\")", err, fixed = TRUE),
+    !file.exists("rok.toml")
+  )
+})
+
 bin <- Sys.getenv("ROK_TEST_BINARY")
 if (nzchar(bin) && file.exists(bin)) {
   home <- tempfile("rok-test-")

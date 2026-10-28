@@ -16,12 +16,17 @@ project_arg <- function(project) {
 #' version of the R that is running, and the latest snapshot date that Posit Package Manager
 #' has published. If the rok binary is not installed yet, [setup()] installs it first.
 #'
+#' Without `path`, the project is created in the working directory, after asking (the same
+#' question also covers installing the binary, the first time). Without anyone to ask, give
+#' `path` or set `options(rok.yes = TRUE)`.
+#'
 #' In an interactive session, R then switches to the project: in Positron or RStudio, R
 #' restarts (after asking if the global environment has objects), or the IDE opens the new
 #' project's folder; elsewhere, you are told to start R in the project's folder. In Positron,
 #' the project's R is also written to `.vscode/settings.json`, after asking.
 #'
-#' @param path The project directory (created if needed); `"."` for the working directory.
+#' @param path The project directory (created if needed). By default, the working directory,
+#'   after asking.
 #' @param r The R version, such as `"4.6"` or `"latest"` (default: the running R).
 #' @param name The project name (default: the directory name).
 #' @returns The result, invisibly.
@@ -30,14 +35,28 @@ project_arg <- function(project) {
 #' dir <- tempfile("my-analysis")
 #' init(dir)
 #' list.files(dir, all.files = TRUE, no.. = TRUE)
-init <- function(path, r = NULL, name = NULL) {
-  if (missing(path)) {
-    stop("Give the project directory, such as `init(\".\")` for the working directory.",
-      call. = FALSE
-    )
+init <- function(path = NULL, r = NULL, name = NULL) {
+  # Nothing is written to the working directory without asking (CRAN policy), and the first
+  # init installs the binary: one question for both.
+  here <- is.null(path)
+  ready <- rok_available()
+  plans <- c(
+    if (here) {
+      sprintf("create a project in %s (rok.toml, rok.lock, .Rprofile and .rok/)", getwd())
+    },
+    if (!ready) setup_plan()
+  )
+  if (length(plans)) {
+    hint <- if (here) {
+      "Give the directory, such as `init(\".\")`, run it in an interactive session"
+    } else {
+      "Run `rok::setup()` in an interactive session"
+    }
+    question <- paste0("rok will ", paste(plans, collapse = ", and "), ". Continue?")
+    if (!consent(question, hint)) stop("Cancelled. Nothing was changed.", call. = FALSE)
   }
-  # The first init installs the binary, after asking once.
-  if (!rok_available()) setup()
+  if (!ready) install_engine()
+  if (here) path <- "."
   if (is.null(r)) r <- current_r_minor()
   result <- rok_call(c("init", path.expand(path), opt("--r", r), opt("--name", name)))
   if (interactive() && !is.null(result$root)) switch_to_project(result$root, result$r)

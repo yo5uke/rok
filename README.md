@@ -46,8 +46,8 @@ Or download the program for your machine from the
 In R:
 
 ```r
-# Create a project in the working directory
-rok::init(".")
+# Create a project in the working directory (after asking)
+rok::init()
 
 # Declare, resolve, lock and install packages
 rok::add("fixest", "modelsummary")

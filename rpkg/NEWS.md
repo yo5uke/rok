@@ -1,6 +1,7 @@
 # rok (development version)
 
-* `init()` needs the project directory: `init(".")` for the working directory.
+* Without a directory, `init()` asks before creating the project in the working directory;
+  the first time, the same question covers installing the rok program.
 * Outside Positron and RStudio, `init()` no longer switches the running R session to the
   project; it says to start R in the project folder.
 * `add()` takes `repo`, the URL of a CRAN-like repository such as R-multiverse or an

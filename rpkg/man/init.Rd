@@ -4,10 +4,11 @@
 \alias{init}
 \title{Create a project}
 \usage{
-init(path, r = NULL, name = NULL)
+init(path = NULL, r = NULL, name = NULL)
 }
 \arguments{
-\item{path}{The project directory (created if needed); \code{"."} for the working directory.}
+\item{path}{The project directory (created if needed). By default, the working directory,
+after asking.}
 
 \item{r}{The R version, such as \code{"4.6"} or \code{"latest"} (default: the running R).}
 
@@ -22,6 +23,10 @@ version of the R that is running, and the latest snapshot date that Posit Packag
 has published. If the rok binary is not installed yet, \code{\link[=setup]{setup()}} installs it first.
 }
 \details{
+Without \code{path}, the project is created in the working directory, after asking (the same
+question also covers installing the binary, the first time). Without anyone to ask, give
+\code{path} or set \code{options(rok.yes = TRUE)}.
+
 In an interactive session, R then switches to the project: in Positron or RStudio, R
 restarts (after asking if the global environment has objects), or the IDE opens the new
 project's folder; elsewhere, you are told to start R in the project's folder. In Positron,

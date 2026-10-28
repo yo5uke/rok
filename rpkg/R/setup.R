@@ -28,15 +28,23 @@ package_library <- function() {
   file.path(data_dir(), "library", paste0("R-", current_r_minor()))
 }
 
-consent <- function(question) {
+# Asks before rok writes outside the session's temporary directory. Without anyone to ask,
+# only `options(rok.yes = TRUE)` agrees; `hint` says what else to do.
+consent <- function(question, hint = "Run `rok::setup()` in an interactive session") {
   if (isTRUE(getOption("rok.yes"))) return(TRUE)
   if (!interactive()) {
-    stop(question, "\n",
-      "\u2139 Run `rok::setup()` in an interactive session, or set `options(rok.yes = TRUE)`.",
-      call. = FALSE
-    )
+    stop(question, "\n", "\u2139 ", hint, ", or set `options(rok.yes = TRUE)`.", call. = FALSE)
   }
   isTRUE(ask_yes_no(question, default = TRUE))
+}
+
+# What setup() does, as part of a question that starts with "rok will".
+setup_plan <- function(binary = NULL) {
+  sprintf(
+    "put its engine (%s) in %s and a copy of the rok package in %s",
+    if (is.null(binary)) "downloaded from GitHub" else "from the file you gave",
+    dirname(binary_path()), package_library()
+  )
 }
 
 #' Install the rok binary
@@ -52,16 +60,18 @@ consent <- function(question) {
 #' @examplesIf interactive()
 #' setup()
 setup <- function(binary = NULL) {
+  if (!consent(paste0("rok will ", setup_plan(binary), ". Continue?"))) {
+    stop("Cancelled. Nothing was changed.", call. = FALSE)
+  }
+  install_engine(binary)
+}
+
+# setup() once agreed: installs the binary and places this package.
+install_engine <- function(binary = NULL) {
   version <- as.character(utils::packageVersion("rok"))
   dest <- binary_path()
   lib <- package_library()
   source <- if (is.null(binary)) release_file(version) else path.expand(binary)
-  question <- sprintf(
-    "rok will put its engine (%s) in %s and a copy of the rok package in %s. Continue?",
-    if (is.null(binary)) "downloaded from GitHub" else "from the file you gave",
-    dirname(dest), lib
-  )
-  if (!consent(question)) stop("Cancelled. Nothing was changed.", call. = FALSE)
 
   tmp <- tempfile("rok-setup-")
   dir.create(tmp)
