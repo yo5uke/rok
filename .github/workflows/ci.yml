@@ -59,6 +59,10 @@ jobs:
           echo "ROK_TEST_BINARY=$PWD/target/release/rok" >> "$GITHUB_ENV"
       - name: R CMD check
         shell: bash
+        env:
+          # Cargo.toml and rpkg/DESCRIPTION keep the current released version until the next release;
+          # skip the remote CRAN incoming version comparison against the already-published version.
+          _R_CHECK_CRAN_INCOMING_REMOTE_: "false"
         run: |
           R CMD build rpkg
           R CMD check --as-cran --no-manual rok_*.tar.gz
