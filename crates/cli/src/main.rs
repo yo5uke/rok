@@ -101,9 +101,13 @@ enum Command {
         /// The R version to use instead of the project's, such as 4.5 or 4.5.1.
         #[arg(long, value_name = "VERSION")]
         r: Option<String>,
+        /// Only bring the project's R, rok.lock and library up to date, asking what needs an
+        /// answer (used by the R package before it runs the script).
+        #[arg(long, hide = true)]
+        prepare: bool,
         /// The script, then arguments passed to it.
         #[arg(
-            required = true,
+            required_unless_present = "prepare",
             trailing_var_arg = true,
             allow_hyphen_values = true,
             value_name = "FILE"
@@ -311,7 +315,8 @@ fn main() -> ExitCode {
             Ok(code) => return code,
             Err(e) => Err(e),
         },
-        Command::Run { r, args } => match rcmd::run(&ui, project, r, &args) {
+        Command::Run { prepare: true, .. } => rcmd::prepare_run(&ui, project),
+        Command::Run { r, args, .. } => match rcmd::run(&ui, project, r, &args) {
             Ok(code) => return code,
             Err(e) => Err(e),
         },

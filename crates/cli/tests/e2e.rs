@@ -67,6 +67,27 @@ fn finds_the_project_above_a_relative_directory() {
     assert!(String::from_utf8_lossy(&outside.stderr).contains("No rok.toml found in"));
 }
 
+/// `rok init` that stops before writing the project (here at the question about a nested
+/// project) leaves no directory it created, and keeps those that were there.
+#[test]
+fn init_removes_the_directories_it_created_when_it_stops() {
+    let t = tempfile::tempdir().unwrap();
+    let home = t.path();
+    std::fs::create_dir_all(home.join("proj/existing")).unwrap();
+    std::fs::write(home.join("proj/rok.toml"), "").unwrap();
+
+    // Handed to a program (--json), and refused without a terminal.
+    let asked = rok(home, &["init", "proj/new/deeper", "--json"]);
+    assert_eq!(asked.status.code(), Some(2));
+    let refused = rok(home, &["init", "proj/new/deeper"]);
+    assert_eq!(refused.status.code(), Some(1));
+    assert!(!home.join("proj/new").exists());
+
+    let kept = rok(home, &["init", "proj/existing"]);
+    assert_eq!(kept.status.code(), Some(1));
+    assert!(home.join("proj/existing").is_dir());
+}
+
 /// The R package waits for events, not for stderr: arguments that cannot be parsed end with
 /// the message and the exit status in the events file.
 #[test]
@@ -267,6 +288,13 @@ fn runs_scripts_with_the_project_library() {
         .unwrap()
         .file_name();
     std::fs::create_dir_all(proj.join("data/library").join(&minor)).unwrap();
+
+    // The R package prepares the run first (with --json, so that questions come back to it);
+    // outside a project there is nothing to prepare.
+    let prepared = json(&rok(&proj, &["run", "--prepare", "--json"]));
+    assert_eq!(prepared["prepared"], true);
+    let outside = json(&rok(home, &["run", "--prepare", "--json"]));
+    assert_eq!(outside["prepared"], false);
 
     // The script sees the project library first, then rok's own, gets its arguments, and its
     // exit status becomes rok's.

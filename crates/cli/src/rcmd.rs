@@ -692,6 +692,25 @@ fn choose_strategy(
 
 // ---- rok run ----
 
+/// `rok run --prepare`: what `rok run` does before the script, alone. The R package runs it
+/// with `--json` first, so that questions (installing R, building from source) are asked in R;
+/// the script then runs without any. Outside a project there is nothing to prepare.
+pub fn prepare_run(ui: &Ui, project_dir: Option<&Path>) -> anyhow::Result<()> {
+    let prepared = match find_project(project_dir) {
+        Ok(project) => {
+            let env = Env::from_env()?;
+            let (_, manifest) = project.read_manifest()?;
+            let old_lock = project.read_lock()?;
+            let r = project_r(ui, &env, &manifest, old_lock.as_ref())?;
+            crate::commands::ensure_synced(ui, &env, &project, &manifest, old_lock, &r)?;
+            true
+        }
+        Err(_) => false,
+    };
+    ui.result(json!({ "command": "run", "prepared": prepared }));
+    Ok(())
+}
+
 pub fn run(
     ui: &Ui,
     project_dir: Option<&Path>,

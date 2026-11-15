@@ -259,8 +259,29 @@ pub fn init(
     if dir.join(manifest::FILE_NAME).exists() {
         bail!("{} is already a rok project.", dir.display());
     }
+    // The directories this call creates, deepest first. If it stops before the project is
+    // written (a question answered no, or handed to the R package, an error), they are removed
+    // again, so that nothing changed. One that is no longer empty stays.
+    let created: Vec<PathBuf> = dir
+        .ancestors()
+        .take_while(|d| !d.as_os_str().is_empty() && !d.exists())
+        .map(Path::to_path_buf)
+        .collect();
     std::fs::create_dir_all(&dir).with_context(|| format!("cannot create {}", dir.display()))?;
-    let dir = rok_core::fsutil::canonicalize(&dir)?;
+    let result = init_in(ui, &dir, r, name);
+    if result.is_err() {
+        for d in &created {
+            if std::fs::remove_dir(d).is_err() {
+                break;
+            }
+        }
+    }
+    result
+}
+
+/// `rok init` in `dir`, which exists.
+fn init_in(ui: &Ui, dir: &Path, r: Option<String>, name: Option<String>) -> anyhow::Result<()> {
+    let dir = rok_core::fsutil::canonicalize(dir)?;
     if std::env::home_dir()
         .and_then(|h| rok_core::fsutil::canonicalize(&h).ok())
         .as_deref()
