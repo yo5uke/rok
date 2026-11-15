@@ -82,7 +82,7 @@ check_version <- function(bin) {
       call. = FALSE
     )
   }
-  if (!identical(found, wanted)) {
+  if (!same_version(found, wanted)) {
     # A newer binary (after `rok self update`) asks for a newer package, not an older binary.
     fix <- if (utils::compareVersion(found, wanted) > 0) {
       paste0("\u2139 Update the rok package to ", found, ", or run `rok::setup()` to go back to rok ", wanted, ".")
@@ -94,6 +94,12 @@ check_version <- function(bin) {
     )
   }
   invisible(TRUE)
+}
+
+# Whether two versions are the same. The binary writes a development version such as
+# 0.2.0.9000 as 0.2.0-9000 (Cargo's form); R takes `-` and `.` alike.
+same_version <- function(a, b) {
+  utils::compareVersion(a, b) == 0
 }
 
 # Runs the binary with `args` and `--json`. Messages for people go to the console (stderr);

@@ -73,6 +73,12 @@ install_engine <- function(binary = NULL) {
   lib <- package_library()
   source <- if (is.null(binary)) release_file(version) else path.expand(binary)
 
+  if (is.null(binary) && is_dev_version(version)) {
+    stop("rok ", version, " is a development version, so no release has its binary.\n",
+      "\u2139 Build rok from the same source and run `rok::setup(binary = <path>)`.",
+      call. = FALSE
+    )
+  }
   tmp <- tempfile("rok-setup-")
   dir.create(tmp)
   on.exit(unlink(tmp, recursive = TRUE), add = TRUE)
@@ -82,7 +88,7 @@ install_engine <- function(binary = NULL) {
   if (is.na(found)) {
     stop("`", source, "` is not a rok binary that runs on this machine.", call. = FALSE)
   }
-  if (!identical(found, version)) {
+  if (!same_version(found, version)) {
     stop("`", source, "` is rok ", found, ", but this package needs rok ", version, ".",
       call. = FALSE
     )
@@ -101,6 +107,11 @@ install_engine <- function(binary = NULL) {
   place_package(lib)
   message("\u2714 Installed rok ", version, " in ", dirname(dest), ".")
   invisible(list(binary = dest, library = lib))
+}
+
+# A development version (0.2.0.9000) has a fourth component; releases have three.
+is_dev_version <- function(version) {
+  length(unclass(package_version(version))[[1L]]) > 3L
 }
 
 download_binary <- function(url, dir) {

@@ -36,9 +36,15 @@ jobs:
           cargo=$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"/\1/p' Cargo.toml)
           rpkg=$(sed -n 's/^Version: *//p' rpkg/DESCRIPTION)
           echo "Cargo: $cargo, R package: $rpkg, ref: $GITHUB_REF_NAME"
-          [ "$cargo" = "$rpkg" ] || { echo "::error::Cargo.toml and rpkg/DESCRIPTION differ"; exit 1; }
-          if [ "$GITHUB_REF_TYPE" = tag ] && [ "$GITHUB_REF_NAME" != "v$cargo" ]; then
-            echo "::error::the tag is $GITHUB_REF_NAME, but the version is $cargo"; exit 1
+          # A development version is 0.2.0.9000 in DESCRIPTION and 0.2.0-9000 in Cargo.toml.
+          [ "${cargo//-/.}" = "$rpkg" ] || { echo "::error::Cargo.toml and rpkg/DESCRIPTION differ"; exit 1; }
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            if ! [[ "$cargo" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "::error::$cargo is a development version; set the release version before tagging"; exit 1
+            fi
+            if [ "$GITHUB_REF_NAME" != "v$cargo" ]; then
+              echo "::error::the tag is $GITHUB_REF_NAME, but the version is $cargo"; exit 1
+            fi
           fi
           echo "version=$cargo" >> "$GITHUB_OUTPUT"
 

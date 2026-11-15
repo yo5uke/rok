@@ -14,6 +14,11 @@ stopifnot(
     "https://github.com/yo5uke/rok/releases/download/v0.1.0/rok-x86_64-pc-windows-msvc.tar.gz"
   ),
   identical(rok:::opt("--to", NULL), character()),
+  # The binary writes a development version with `-` (Cargo's form).
+  rok:::same_version("0.2.0-9000", "0.2.0.9000"),
+  !rok:::same_version("0.2.0", "0.2.0.9000"),
+  rok:::is_dev_version("0.2.0.9000"),
+  !rok:::is_dev_version("0.2.1"),
   identical(rok:::opt("--depth", 2), c("--depth", "2"))
 )
 

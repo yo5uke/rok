@@ -1,3 +1,15 @@
+# rok (development version)
+
+* Functions called from a subfolder of a project (R's working directory below the project
+  root) find the project again; they failed with "No rok.toml found".
+* `status()` returns the details of each problem: `problems$details` is a list column
+  (it was `NA` unless a problem had exactly one detail).
+* `options(rok.yes = TRUE)` also answers the questions the rok program asks on a terminal,
+  and applies to `run()`.
+* An argument the rok program does not accept, such as `pin_r(strategy = "x")`, fails at
+  once in interactive sessions instead of after 10 seconds.
+* `import_renv()` stops with a clear message for a GitHub package without a full commit SHA.
+
 # rok 0.2.0
 
 * Without a directory, `init()` asks before creating the project in the working directory;
