@@ -269,7 +269,8 @@ tree <- function(pkg = NULL, depth = NULL, project = ".") {
 #' Run a script with the project's R
 #'
 #' Syncs the project, then runs `file` with `Rscript` in a separate process, using the
-#' project's R (or `r`) and library.
+#' project's R (or `r`) and library. If syncing needs an answer first (installing the
+#' project's R, or building packages from source), it is asked here.
 #'
 #' @param file The script.
 #' @param args Arguments passed to the script.
@@ -284,6 +285,9 @@ tree <- function(pkg = NULL, depth = NULL, project = ".") {
 #' writeLines('cat("Hello from", R.version.string, "\\n")', script)
 #' run(script, project = dir)
 run <- function(file, args = character(), r = NULL, project = ".") {
+  # Sync through rok_call(), which asks what needs an answer in R: the script's own run below
+  # cannot (its output goes straight to the console), so it then has nothing left to ask.
+  rok_call(c(project_arg(project), "run", "--prepare"))
   status <- system2(
     rok_binary(),
     shQuote(c(project_arg(project), yes_arg(), "run", opt("--r", r), path.expand(file), args))

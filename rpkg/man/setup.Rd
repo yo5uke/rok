@@ -18,6 +18,11 @@ of this package where activated projects can load it. Everything goes under
 \code{tools::R_user_dir("rok", "data")}, after asking once. \code{\link[=init]{init()}} calls this when needed;
 run it yourself to repair an installation or to install without the network.
 }
+\details{
+A downloaded binary is checked against the SHA-256 published with it, which needs R 4.5.0
+or later (\code{tools::sha256sum()}); with an older R, only HTTPS protects the download, and
+\code{setup()} says so.
+}
 \examples{
 \dontshow{if (interactive()) withAutoprint(\{ # examplesIf}
 setup()

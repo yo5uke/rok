@@ -20,7 +20,8 @@ The exit status of the script, invisibly.
 }
 \description{
 Syncs the project, then runs \code{file} with \code{Rscript} in a separate process, using the
-project's R (or \code{r}) and library.
+project's R (or \code{r}) and library. If syncing needs an answer first (installing the
+project's R, or building packages from source), it is asked here.
 }
 \examples{
 \dontshow{if (interactive() && rok_available()) withAutoprint(\{ # examplesIf}

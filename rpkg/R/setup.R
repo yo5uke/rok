@@ -54,6 +54,10 @@ setup_plan <- function(binary = NULL) {
 #' `tools::R_user_dir("rok", "data")`, after asking once. [init()] calls this when needed;
 #' run it yourself to repair an installation or to install without the network.
 #'
+#' A downloaded binary is checked against the SHA-256 published with it, which needs R 4.5.0
+#' or later (`tools::sha256sum()`); with an older R, only HTTPS protects the download, and
+#' `setup()` says so.
+#'
 #' @param binary The path of a rok binary to install instead of downloading one.
 #' @returns A list with the paths of the binary and of the package library, invisibly.
 #' @export
@@ -114,21 +118,50 @@ is_dev_version <- function(version) {
   length(unclass(package_version(version))[[1L]]) > 3L
 }
 
-download_binary <- function(url, dir) {
-  file <- file.path(dir, basename(url))
-  status <- tryCatch(
-    utils::download.file(url, file, mode = "wb", quiet = TRUE),
-    error = function(e) stop("Could not download ", url, ": ", conditionMessage(e), call. = FALSE)
+# Downloads `url` to `file`; FALSE if it cannot (download.file() signals most failures as
+# errors and warnings, not by its value).
+fetch <- function(url, file) {
+  ok <- tryCatch(
+    suppressWarnings(utils::download.file(url, file, mode = "wb", quiet = TRUE)) == 0L,
+    error = function(e) FALSE
   )
-  if (status != 0L) stop("Could not download ", url, ".", call. = FALSE)
-  # Release files come with their SHA-256 (tools::sha256sum() exists from R 4.5.0).
-  sum_file <- file.path(dir, "checksum")
-  if (exists("sha256sum", envir = asNamespace("tools")) &&
-      utils::download.file(paste0(url, ".sha256"), sum_file, quiet = TRUE) == 0L) {
-    expected <- strsplit(readLines(sum_file, warn = FALSE)[[1L]], "[[:space:]]+")[[1L]][[1L]]
-    actual <- unname(get("sha256sum", envir = asNamespace("tools"))(file))
-    if (!identical(tolower(expected), actual)) {
-      stop("The download of ", url, " is damaged (SHA-256 mismatch).", call. = FALSE)
+  isTRUE(ok) && file.exists(file)
+}
+
+# tools::sha256sum(), which exists from R 4.5.0; NULL before.
+sha256_fun <- function() {
+  get0("sha256sum", envir = asNamespace("tools"), mode = "function", inherits = FALSE)
+}
+
+# Downloads a release file and checks it against the SHA-256 published beside it
+# (`<url>.sha256`). Without one, nothing is installed: an unchecked program would run. R older
+# than 4.5.0 cannot compute SHA-256, so there only HTTPS protects the download.
+download_binary <- function(url, dir, sha256 = sha256_fun()) {
+  file <- file.path(dir, basename(url))
+  if (!fetch(url, file)) stop("Could not download ", url, ".", call. = FALSE)
+  if (is.null(sha256)) {
+    message(
+      "! R ", getRversion(), " cannot compute SHA-256 (R 4.5.0 or later can), so the download ",
+      "was not checked against its checksum; only HTTPS protected it."
+    )
+  } else {
+    sum_file <- file.path(dir, "checksum")
+    expected <- if (fetch(paste0(url, ".sha256"), sum_file)) {
+      tolower(strsplit(trimws(readLines(sum_file, warn = FALSE)[1L]), "[[:space:]]+")[[1L]][1L])
+    }
+    if (length(expected) != 1L || is.na(expected) || !grepl("^[0-9a-f]{64}$", expected)) {
+      stop("Could not get the SHA-256 of ", url, ", so the download cannot be checked; ",
+        "nothing was installed.\n",
+        "\u2139 Try again later, or download the binary yourself and run ",
+        "`rok::setup(binary = <path>)`.",
+        call. = FALSE
+      )
+    }
+    if (!identical(unname(sha256(file)), expected)) {
+      stop("The download of ", url, " is damaged (its SHA-256 does not match); ",
+        "nothing was installed.",
+        call. = FALSE
+      )
     }
   }
   utils::untar(file, exdir = dir)

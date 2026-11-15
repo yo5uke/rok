@@ -107,20 +107,23 @@ if (nzchar(bin) && file.exists(bin) && .Platform$OS.type == "unix") {
 # run_watched() relays messages, draws the progress line, and returns the exit status the
 # program reports; a program that stops without reporting it has failed.
 if (.Platform$OS.type == "unix") {
-  fake <- function(lines) {
+  # `pid = FALSE`: a program that never reports its process id (it is not rok, or has not
+  # started yet).
+  fake <- function(lines, pid = TRUE) {
     path <- tempfile()
     # The events file is the last argument.
     writeLines(c(
-      "#!/bin/sh", "for ev; do :; done", "printf '\\001pid %s\\n' $$ >> \"$ev\"", lines
+      "#!/bin/sh", "for ev; do :; done",
+      if (pid) "printf '\\001pid %s\\n' $$ >> \"$ev\"", lines
     ), path)
     Sys.chmod(path, "755")
     path
   }
-  watch <- function(program) {
+  watch <- function(program, start_limit = 120) {
     out <- tempfile()
     shown <- character()
     status <- withCallingHandlers(
-      rok:::run_watched(program, character(), out),
+      rok:::run_watched(program, character(), out, start_limit = start_limit),
       message = function(m) {
         shown <<- c(shown, conditionMessage(m))
         invokeRestart("muffleMessage")
@@ -148,4 +151,61 @@ if (.Platform$OS.type == "unix") {
 
   crashed <- watch(fake(c("echo 'boom' >&2", "kill -9 $$")))
   stopifnot(identical(crashed$status, 1L), "boom\n" %in% crashed$shown)
+
+  # A program that cannot start says so on stderr: it fails at once, without waiting for the
+  # start limit.
+  begun <- Sys.time()
+  broken <- watch(fake("echo 'cannot run' >&2", pid = FALSE))
+  stopifnot(
+    identical(broken$status, 1L),
+    "cannot run\n" %in% broken$shown,
+    difftime(Sys.time(), begun, units = "secs") < 10
+  )
+
+  # One that is slow to start is waited for up to the limit, then reported as perhaps still
+  # running (not as stopped).
+  slow <- watch(fake("sleep 2", pid = FALSE), start_limit = 0.5)
+  stopifnot(
+    identical(slow$status, 1L),
+    any(grepl("did not start within 0.5 seconds", slow$shown, fixed = TRUE))
+  )
 }
+
+# A downloaded binary is checked against the SHA-256 published beside it; without one, nothing
+# is installed. (file:// URLs stand in for the release.)
+if (.Platform$OS.type == "unix" && !is.null(rok:::sha256_fun())) local({
+  release <- tempfile("release-")
+  dir.create(release)
+  writeLines("#!/bin/sh", file.path(release, "rok"))
+  old <- setwd(release)
+  utils::tar("rok-test.tar.gz", files = "rok", compression = "gzip")
+  setwd(old)
+  archive <- file.path(release, "rok-test.tar.gz")
+  url <- paste0("file://", normalizePath(archive))
+  sum <- unname(rok:::sha256_fun()(archive))
+  get <- function(...) {
+    dir <- tempfile("download-")
+    dir.create(dir)
+    tryCatch(rok:::download_binary(url, dir, ...), error = conditionMessage)
+  }
+
+  # No checksum published: refused.
+  stopifnot(grepl("Could not get the SHA-256", get(), fixed = TRUE))
+  # The right one: the binary is unpacked.
+  writeLines(paste0(sum, "  rok-test.tar.gz"), paste0(archive, ".sha256"))
+  stopifnot(identical(basename(get()), "rok"))
+  # Another one: refused as damaged.
+  writeLines(paste0(strrep("0", 64), "  rok-test.tar.gz"), paste0(archive, ".sha256"))
+  stopifnot(grepl("is damaged", get(), fixed = TRUE))
+  # Where R cannot compute SHA-256, the download goes on with a note.
+  shown <- character()
+  found <- withCallingHandlers(
+    get(sha256 = NULL),
+    message = function(m) {
+      shown <<- c(shown, conditionMessage(m))
+      invokeRestart("muffleMessage")
+    }
+  )
+  stopifnot(identical(basename(found), "rok"), any(grepl("only HTTPS", shown, fixed = TRUE)))
+  unlink(release, recursive = TRUE)
+})

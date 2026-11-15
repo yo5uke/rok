@@ -9,6 +9,16 @@
 * An argument the rok program does not accept, such as `pin_r(strategy = "x")`, fails at
   once in interactive sessions instead of after 10 seconds.
 * `import_renv()` stops with a clear message for a GitHub package without a full commit SHA.
+* `run()` asks in R what syncing the project needs an answer to (installing the project's R,
+  building packages from source), instead of stopping with advice meant for a terminal.
+* `setup()` installs a downloaded binary only once it matches the SHA-256 published with it,
+  and says so when it cannot get one. R older than 4.5.0 cannot compute SHA-256: there it
+  says that only HTTPS protected the download.
+* `init()` that stops before the project is written (a question answered no, an error)
+  leaves no empty directory behind.
+* When the rok program is slow to start (a virus scanner checking it), interactive sessions
+  wait for it, up to 2 minutes, instead of reporting a failure after 10 seconds while it
+  went on in the background.
 
 # rok 0.2.0
 

@@ -140,7 +140,9 @@ rok_call <- function(args) {
 # Windows, R shows a program's output only line by line. And on Windows, R cannot read a file
 # that system2() redirects output to until the program exits, so the binary writes the events
 # file itself.) Returns the exit status. If R is interrupted, the binary is stopped too.
-run_watched <- function(bin, args, out) {
+# `start_limit` is how many seconds to wait for the binary to start (to report its process
+# id): a virus scanner can hold a new program back for a while.
+run_watched <- function(bin, args, out, start_limit = 120) {
   events <- tempfile("rok-")
   err <- tempfile("rok-")
   file.create(events)
@@ -191,9 +193,23 @@ run_watched <- function(bin, args, out) {
       break
     }
     if (!length(lines)) {
-      if (is.na(pid) && difftime(Sys.time(), started, units = "secs") > 10) {
-        ended <- TRUE
-        next
+      if (is.na(pid)) {
+        # Not started yet. A message on stderr means it never will (the shell could not run
+        # it); otherwise it is still starting. Giving up does not stop it (its process id is
+        # not known), so say that it may still run.
+        if (length(readable_lines(err))) {
+          ended <- TRUE
+          next
+        }
+        if (difftime(Sys.time(), started, units = "secs") > start_limit) {
+          message(
+            "! rok did not start within ", start_limit, " seconds. It may still start and ",
+            "carry out the command.\n",
+            "\u2139 Wait a moment before running the command again."
+          )
+          ended <- TRUE
+          next
+        }
       }
       if (!is.na(pid) && difftime(Sys.time(), checked, units = "secs") > 1) {
         checked <- Sys.time()
