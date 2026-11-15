@@ -5,7 +5,7 @@ members = ["crates/core", "crates/rinstall", "crates/cli"]
 [workspace.package]
 # The R package's version, with `-` for its fourth component: a development version
 # `0.2.0.9000` is `0.2.0-9000` here (Cargo takes three numbers), and the binary reports it so.
-version = "0.2.0-9000"
+version = "0.2.1"
 edition = "2024"
 rust-version = "1.95"
 license = "MIT"

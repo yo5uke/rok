@@ -1,4 +1,4 @@
-# rok (development version)
+# rok 0.2.1
 
 * Functions called from a subfolder of a project (R's working directory below the project
   root) find the project again; they failed with "No rok.toml found".

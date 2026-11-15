@@ -8,7 +8,7 @@ rok keeps each R project reproducible. A project declares the packages it uses i
 sources, and R version in `rok.lock`, and links them into the project's library from a shared
 cache. Anyone who opens the project gets the same packages, and the same R if they need it.
 
-> **Status:** pre-release (0.2.0). Linux and Windows are supported; macOS is experimental.
+> **Status:** pre-release (0.2.1). Linux and Windows are supported; macOS is experimental.
 
 ## Why rok
 
@@ -31,7 +31,7 @@ From R, install the package and let it fetch the command-line program:
 
 ```r
 install.packages(
-  "https://github.com/yo5uke/rok/releases/download/v0.2.0/rok_0.2.0.tar.gz",
+  "https://github.com/yo5uke/rok/releases/download/v0.2.1/rok_0.2.1.tar.gz",
   repos = NULL, type = "source"
 )
 rok::setup()   # downloads the rok program for this machine, after asking
