@@ -1,4 +1,4 @@
-//! End-to-end tests of the `rok` binary. They need the network and an installed R, so they are
+//! End-to-end tests of the `rok` binary. Most need the network and an installed R, so they are
 //! ignored by default; run them with `cargo test -p rok-cli -- --ignored`.
 
 use std::path::Path;
@@ -29,6 +29,72 @@ fn json(out: &Output) -> serde_json::Value {
         String::from_utf8_lossy(&out.stderr)
     );
     serde_json::from_slice(&out.stdout).expect("JSON on stdout")
+}
+
+/// The R package always passes `--project .`: the project is found from its subdirectories
+/// too, as without `--project`.
+#[test]
+fn finds_the_project_above_a_relative_directory() {
+    let t = tempfile::tempdir().unwrap();
+    let home = t.path();
+    let sub = home.join("proj/code");
+    std::fs::create_dir_all(&sub).unwrap();
+    std::fs::write(
+        home.join("proj/rok.toml"),
+        "[project]\nname = \"proj\"\nr = \"4.5\"\nsnapshot = \"2026-10-01\"\n\n[dependencies]\n",
+    )
+    .unwrap();
+    let run = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_rok"))
+            .args(args)
+            .current_dir(&sub)
+            .env("ROK_CACHE_DIR", home.join("cache"))
+            .env("ROK_DATA_DIR", home.join("data"))
+            .env("NO_COLOR", "1")
+            .output()
+            .expect("rok runs")
+    };
+    for args in [
+        &["status", "--json"][..],
+        &["--project", ".", "status", "--json"],
+        &["--project", "../code", "status", "--json"],
+    ] {
+        assert_eq!(json(&run(args))["project"], "proj", "{args:?}");
+    }
+    // Outside a project, the message names the directory that was searched.
+    let outside = rok(home, &["--project", ".", "status"]);
+    assert_eq!(outside.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&outside.stderr).contains("No rok.toml found in"));
+}
+
+/// The R package waits for events, not for stderr: arguments that cannot be parsed end with
+/// the message and the exit status in the events file.
+#[test]
+fn reports_unparsed_arguments_as_events() {
+    let t = tempfile::tempdir().unwrap();
+    let events = t.path().join("events");
+    let out = rok(
+        t.path(),
+        &[
+            "r",
+            "pin",
+            "4.5",
+            "--strategy",
+            "bogus",
+            "--json",
+            "--events",
+            events.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(out.status.code(), Some(2));
+    assert!(out.stderr.is_empty(), "the message goes to the events file");
+    let text = std::fs::read_to_string(&events).unwrap();
+    assert!(text.contains("invalid value 'bogus'"), "{text}");
+    assert!(text.ends_with("\x01exit 2\n"), "{text}");
+    // Without --events, the message is on stderr as usual.
+    let out = rok(t.path(), &["r", "pin", "4.5", "--strategy", "bogus"]);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("invalid value 'bogus'"));
 }
 
 #[test]

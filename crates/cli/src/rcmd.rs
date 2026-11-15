@@ -707,12 +707,13 @@ pub fn run(
             .filter(|i| req.matches(&i.version))
             .max_by(|a, b| a.version.cmp(&b.version).then(b.kind.cmp(&a.kind)))
             .cloned()
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "No installed R matches `{}`; install it with `rok r install {}`.",
-                    r.as_deref().unwrap_or(""),
-                    r.as_deref().unwrap_or("")
-                )
+            .ok_or_else(|| match r.as_deref() {
+                Some(asked) => anyhow::anyhow!(
+                    "No installed R matches `{asked}`; install it with `rok r install {asked}`."
+                ),
+                None => {
+                    anyhow::anyhow!("No R installation was found; install R with `rok r install`.")
+                }
             })
     };
     let mut cmd;

@@ -236,8 +236,39 @@ enum RCommand {
     },
 }
 
+/// The file of `--events`, read from the arguments as they are: for when they cannot be parsed.
+fn events_file() -> Option<PathBuf> {
+    let mut args = std::env::args_os().skip(1);
+    while let Some(arg) = args.next() {
+        if arg == "--events" {
+            return args.next().map(PathBuf::from);
+        }
+        if let Some(file) = arg.to_str().and_then(|a| a.strip_prefix("--events=")) {
+            return Some(PathBuf::from(file));
+        }
+    }
+    None
+}
+
+/// The arguments could not be parsed (or asked for the help or the version): prints what clap
+/// says and returns its exit status. The R package waits for events, not for stderr, so with
+/// `--events` the message and the exit status go to that file.
+fn unparsed(e: clap::Error) -> ExitCode {
+    let code: u8 = if e.use_stderr() { 2 } else { 0 };
+    let told = events_file().is_some_and(|file| {
+        std::fs::write(file, format!("{}\n\x01exit {code}\n", e.render())).is_ok()
+    });
+    if !told {
+        let _ = e.print();
+    }
+    ExitCode::from(code)
+}
+
 fn main() -> ExitCode {
-    let cli = Cli::parse();
+    let cli = match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(e) => return unparsed(e),
+    };
     let events = cli.events.is_some();
     let ui = match ui::Ui::new(
         cli.yes,

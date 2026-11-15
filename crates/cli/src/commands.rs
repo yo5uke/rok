@@ -23,10 +23,22 @@ use serde_json::json;
 
 use crate::ui::{Ui, changes_json};
 
+/// `dir` as an absolute path without `..`, so that its parent directories can be searched: a
+/// relative path such as `.` (which the R package passes) has none.
+fn absolute(dir: &Path) -> std::io::Result<PathBuf> {
+    // Windows resolves `..` without looking at the disk. Elsewhere only canonicalize does,
+    // which needs the directory to exist; one that does not exist holds no project anyway.
+    if cfg!(windows) {
+        std::path::absolute(dir)
+    } else {
+        rok_core::fsutil::canonicalize(dir).or_else(|_| std::path::absolute(dir))
+    }
+}
+
 /// The project for `--project`, or the one containing the current directory.
 pub(crate) fn find_project(dir: Option<&Path>) -> anyhow::Result<Project> {
     let start = match dir {
-        Some(d) => d.to_path_buf(),
+        Some(d) => absolute(d)?,
         None => std::env::current_dir()?,
     };
     Project::find(&start).ok_or_else(|| {

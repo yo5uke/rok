@@ -239,6 +239,13 @@ impl Ui {
         }
     }
 
+    /// Whether someone can answer on the terminal. Not when rok runs for the R package
+    /// (`--events`), even from a terminal: R shows only what goes to the events file, so a
+    /// question asked here would wait for an answer without being seen.
+    fn can_ask(&self) -> bool {
+        self.events.is_none() && std::io::stdin().is_terminal()
+    }
+
     /// Asks a yes/no question, identified by `id`. With `--yes` (or `--confirmed <id>`) the
     /// answer is yes. Without a terminal there is no one to ask: for a program (`--json`) the
     /// question is returned as [`NeedsAnswer`], otherwise it is an error that tells how to
@@ -247,7 +254,7 @@ impl Ui {
         if self.yes || self.confirmed.iter().any(|c| c == id) {
             return Ok(true);
         }
-        if !std::io::stdin().is_terminal() {
+        if !self.can_ask() {
             if self.json {
                 return Err(NeedsAnswer {
                     id: id.to_string(),
@@ -277,7 +284,7 @@ impl Ui {
         if self.declined.iter().any(|c| c == id) {
             return Ok(false);
         }
-        if !std::io::stdin().is_terminal() {
+        if !self.can_ask() {
             if self.json {
                 return Err(NeedsAnswer {
                     id: id.to_string(),
@@ -294,7 +301,7 @@ impl Ui {
         self.prompt(question, default)
     }
 
-    /// Asks on the terminal.
+    /// Asks on the terminal. An empty answer is the default; the end of the input cancels.
     fn prompt(&self, question: &str, default: bool) -> anyhow::Result<bool> {
         let hint = if default { "[Y/n]" } else { "[y/N]" };
         let _ = write!(
@@ -304,7 +311,11 @@ impl Ui {
         );
         let _ = std::io::stderr().flush();
         let mut answer = String::new();
-        std::io::stdin().lock().read_line(&mut answer)?;
+        if std::io::stdin().lock().read_line(&mut answer)? == 0 {
+            // The input ended (Ctrl-D): that is no answer, not the default.
+            let _ = writeln!(std::io::stderr());
+            anyhow::bail!("Cancelled. Nothing was changed.");
+        }
         Ok(match answer.trim().to_ascii_lowercase().as_str() {
             "" => default,
             "y" | "yes" => true,
@@ -325,7 +336,7 @@ impl Ui {
         if self.yes {
             return Ok(0);
         }
-        if !std::io::stdin().is_terminal() {
+        if !self.can_ask() {
             if self.json {
                 return Err(NeedsAnswer {
                     id: id.to_string(),
@@ -352,6 +363,7 @@ impl Ui {
             let _ = std::io::stderr().flush();
             let mut answer = String::new();
             if std::io::stdin().lock().read_line(&mut answer)? == 0 {
+                let _ = writeln!(std::io::stderr());
                 anyhow::bail!("Cancelled. Nothing was changed.");
             }
             match answer.trim() {

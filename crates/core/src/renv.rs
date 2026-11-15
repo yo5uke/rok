@@ -147,9 +147,18 @@ impl RenvLock {
                         .ok_or_else(|| RenvError::Invalid(format!("`{name}` has no `RemoteRepo`")))?
                         .to_string(),
                     reference: text(entry, "RemoteRef").map(str::to_string),
+                    // rok.lock records full commits only.
                     commit: text(entry, "RemoteSha")
-                        .ok_or_else(|| RenvError::Invalid(format!("`{name}` has no `RemoteSha`")))?
-                        .to_string(),
+                        .ok_or_else(|| RenvError::Invalid(format!("`{name}` has no `RemoteSha`")))
+                        .and_then(|sha| {
+                            let full =
+                                sha.len() == 40 && sha.bytes().all(|b| b.is_ascii_hexdigit());
+                            full.then(|| sha.to_string()).ok_or_else(|| {
+                                RenvError::Invalid(format!(
+                                    "`{name}`: `RemoteSha` is not a full commit SHA (`{sha}`)"
+                                ))
+                            })
+                        })?,
                 },
                 other => RenvSource::Other(other.to_string()),
             };
@@ -386,6 +395,17 @@ mod tests {
     "renv": { "Package": "renv", "Version": "1.0.7", "Source": "Repository", "Repository": "CRAN" }
   }
 }"#;
+
+    #[test]
+    fn refuses_github_packages_without_a_full_commit() {
+        // rok.lock could not record it: say so before anything is written.
+        let short = RENV.replace("0123456789abcdef0123456789abcdef01234567", "0123456");
+        let err = RenvLock::parse(&short).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "renv.lock: `coresynth`: `RemoteSha` is not a full commit SHA (`0123456`)"
+        );
+    }
 
     #[test]
     fn reads_renv_lockfiles() {
