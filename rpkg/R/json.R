@@ -166,6 +166,17 @@ simplify <- function(x) {
   unlist(x, use.names = FALSE)
 }
 
+# The problems of status() as a data frame. A problem has any number of details, so `details`
+# is a list column of character vectors (as a flat record, it would be NA unless there is
+# exactly one).
+problems_df <- function(problems) {
+  df <- records_df(problems)
+  if (length(problems)) {
+    df$details <- lapply(problems, function(p) as.character(unlist(p$details)))
+  }
+  df
+}
+
 # A list of flat records (named lists of single values) as a data frame.
 records_df <- function(records) {
   if (!length(records)) return(data.frame())

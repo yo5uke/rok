@@ -224,7 +224,7 @@ undo <- function(project = ".") {
 #' s$ok
 status <- function(packages = FALSE, project = ".") {
   res <- rok_call(c("status", if (packages) "--packages", project_arg(project)))
-  res$problems <- records_df(res$problems)
+  res$problems <- problems_df(res$problems)
   res$packages <- records_df(res$packages)
   invisible(res)
 }
@@ -286,7 +286,7 @@ tree <- function(pkg = NULL, depth = NULL, project = ".") {
 run <- function(file, args = character(), r = NULL, project = ".") {
   status <- system2(
     rok_binary(),
-    shQuote(c(project_arg(project), "run", opt("--r", r), path.expand(file), args))
+    shQuote(c(project_arg(project), yes_arg(), "run", opt("--r", r), path.expand(file), args))
   )
   invisible(status)
 }

@@ -79,6 +79,9 @@ install_engine <- function(binary = NULL) {
   new <- if (is.null(binary)) download_binary(source, tmp) else source
   if (!file.exists(new)) stop("`", new, "` does not exist.", call. = FALSE)
   found <- binary_version(new)
+  if (is.na(found)) {
+    stop("`", source, "` is not a rok binary that runs on this machine.", call. = FALSE)
+  }
   if (!identical(found, version)) {
     stop("`", source, "` is rok ", found, ", but this package needs rok ", version, ".",
       call. = FALSE
@@ -132,11 +135,13 @@ place_package <- function(lib) {
   staged <- file.path(lib, ".rok-new")
   unlink(staged, recursive = TRUE)
   dir.create(staged)
+  on.exit(unlink(staged, recursive = TRUE), add = TRUE)
   if (!file.copy(installed, staged, recursive = TRUE)) {
     stop("Could not copy the rok package to `", lib, "`.", call. = FALSE)
   }
   unlink(target, recursive = TRUE)
-  file.rename(file.path(staged, basename(installed)), target)
-  unlink(staged, recursive = TRUE)
+  if (!file.rename(file.path(staged, basename(installed)), target)) {
+    stop("Could not write `", target, "`.", call. = FALSE)
+  }
   invisible()
 }

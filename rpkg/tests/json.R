@@ -25,6 +25,17 @@ stopifnot(
   identical(obj$problems[[1]]$details, c("a", "b")),
   identical(obj$packages[[2]]$name, "Rcpp")
 )
+problems <- parse_json('[
+  {"level": "warning", "code": "library-mismatch", "details": ["a", "b"], "fix": "Run `rok sync`."},
+  {"level": "info", "code": "r-patch", "details": [], "fix": null},
+  {"level": "info", "code": "unused", "details": ["R6"], "fix": null}]')
+pdf <- rok:::problems_df(problems)
+stopifnot(
+  identical(pdf$code, c("library-mismatch", "r-patch", "unused")),
+  identical(pdf$details, list(c("a", "b"), character(), "R6")),
+  identical(pdf$fix, c("Run `rok sync`.", NA, NA)),
+  identical(nrow(rok:::problems_df(list())), 0L)
+)
 df <- records_df(obj$packages)
 stopifnot(
   identical(df$name, c("fixest", "Rcpp")),

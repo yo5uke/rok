@@ -103,7 +103,8 @@ check_version <- function(bin) {
 # progress can be drawn (see run_watched()).
 rok_call <- function(args) {
   bin <- rok_binary()
-  answers <- character()
+  # With rok.yes, the binary answers yes itself (on a terminal, it would ask there).
+  answers <- yes_arg()
   repeat {
     out <- tempfile("rok-")
     status <- if (interactive()) {
@@ -267,6 +268,11 @@ ask <- function(needs) {
 # starts R that way on Windows, and the dialog opens behind its window: R seems to hang.
 ask_yes_no <- function(question, default = TRUE) {
   utils::askYesNo(question, default = default, prompts = c("Yes", "No", "Cancel"))
+}
+
+# `--yes` when `options(rok.yes = TRUE)` answers every question, or nothing.
+yes_arg <- function() {
+  if (isTRUE(getOption("rok.yes"))) "--yes" else character()
 }
 
 # Arguments for an optional value: `--flag value`, or nothing.
