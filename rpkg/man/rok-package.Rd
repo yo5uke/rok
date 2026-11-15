@@ -28,6 +28,7 @@ this package call it.
 Useful links:
 \itemize{
   \item \url{https://github.com/yo5uke/rok}
+  \item \url{https://yo5uke.com/rok/}
   \item Report bugs at \url{https://github.com/yo5uke/rok/issues}
 }
 

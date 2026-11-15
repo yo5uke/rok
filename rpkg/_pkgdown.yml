@@ -1,0 +1,61 @@
+url: https://yo5uke.com/rok
+
+template:
+  bootstrap: 5
+  light-switch: true
+
+development:
+  mode: release
+
+navbar:
+  structure:
+    left:  [intro, reference, news]
+    right: [search, lightswitch, github]
+
+reference:
+- title: Projects & packages
+  desc: >
+    Create a project and manage its declared, locked, and installed packages.
+  contents:
+  - init
+  - add
+  - remove
+  - sync
+  - update
+  - undo
+
+- title: Inspection & execution
+  desc: >
+    Inspect project state, trace dependencies, and run scripts in the project
+    environment.
+  contents:
+  - status
+  - why
+  - tree
+  - run
+
+- title: R versions
+  desc: >
+    Install portable R builds and move a project between R versions.
+  contents:
+  - install_r
+  - pin_r
+
+- title: Migration from renv
+  desc: >
+    Import an existing renv.lock or write one from rok.lock.
+  contents:
+  - import_renv
+  - export_renv
+
+- title: CLI setup & utilities
+  desc: >
+    Install and locate the rok command-line program.
+  contents:
+  - setup
+  - rok_binary
+  - rok_available
+
+- title: Package overview
+  contents:
+  - rok-package

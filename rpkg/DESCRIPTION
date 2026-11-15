@@ -10,7 +10,7 @@ Description: Manages the packages and the R version of a project. Packages
     command-line program, which this package downloads from the project's
     'GitHub' releases on first use, after asking for user consent.
 License: MIT + file LICENSE
-URL: https://github.com/yo5uke/rok
+URL: https://github.com/yo5uke/rok, https://yo5uke.com/rok/
 BugReports: https://github.com/yo5uke/rok/issues
 Encoding: UTF-8
 Depends: R (>= 4.0.0)

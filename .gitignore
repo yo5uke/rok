@@ -11,6 +11,7 @@ spikes/*/out/
 # R
 .Rhistory
 .RData
+/rpkg/docs/
 
 # Python（spikes の補助スクリプト）
 __pycache__/
